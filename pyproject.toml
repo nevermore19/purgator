@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "purgator"
+version = "0.1.0"
+description = "Cleans caches, stale files and project build artifacts"
+readme = "README"
+requires-python = ">=3.11"
+dependencies = [
+    "croniter>=2.0",
+]
+
+[project.optional-dependencies]
+# Fallback when the distro has no PySide6
+qt = ["PySide6>=6.8"]
+
+[project.scripts]
+purgator = "purgator.app:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
