@@ -3,14 +3,22 @@ from __future__ import annotations
 import shutil
 from pathlib import Path
 
-from PySide6.QtCharts import QChart, QChartView, QPieSeries
+from PySide6.QtCharts import (
+    QBarSeries,
+    QBarSet,
+    QChart,
+    QChartView,
+    QPieSeries,
+    QValueAxis,
+)
 from PySide6.QtCore import QMargins, QSettings, Qt, QTime
-from PySide6.QtGui import QBrush, QCloseEvent, QColor, QPainter
+from PySide6.QtGui import QBrush, QCloseEvent, QColor, QPainter, QPen
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
     QComboBox,
     QFileDialog,
+    QFrame,
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
@@ -167,7 +175,32 @@ class MainWindow(QMainWindow):
             item.setFont(font)
 
     def _build_overview_page(self) -> QWidget:
-        usage = shutil.disk_usage("/")
+        root_candidates = ["/run/host/root", "/home", "/"]
+        root_path = "/"
+        for c in root_candidates:
+            try:
+                p = Path(c)
+                if p.exists():
+                    root_path = c
+                    break
+            except Exception:
+                continue
+        usage = shutil.disk_usage(root_path)
+        # compute home size from root fs perspective for accuracy
+        home_size = usage.used
+        try:
+            import subprocess
+            home_path_on_root = "/home"
+            if root_path == "/run/host/root":
+                home_path_on_root = "/run/host/root/home"
+            r = subprocess.run(["du", "-s", "--block-size=1", home_path_on_root], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            if r.returncode == 0:
+                home_size = int(r.stdout.split()[0])
+            else:
+                home_size = shutil.disk_usage("/home").used
+        except Exception:
+            home_size = shutil.disk_usage("/home").used
+        home_usage = type("U", (), {"total": usage.total, "used": home_size, "free": usage.free})()
         page = QWidget()
         layout = QVBoxLayout(page)
         layout.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignHCenter)
@@ -179,7 +212,7 @@ class MainWindow(QMainWindow):
         )
         box_layout = QVBoxLayout(box)
         box_layout.setContentsMargins(10, 10, 10, 4)
-        box_layout.setSpacing(0)
+        box_layout.setSpacing(8)
         box_layout.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignHCenter)
         title = QLabel("Disk usage")
         title.setStyleSheet("font-size: 20px; font-weight: 600; color: black;")
@@ -191,6 +224,8 @@ class MainWindow(QMainWindow):
         available.setGeometry(0, int(view.height() * 0.66), view.width(), 22)
         available.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         box_layout.addWidget(view)
+        bar_view = self._build_home_to_disk_bar(home_usage, usage)
+        box_layout.addWidget(bar_view)
         layout.addWidget(box)
         layout.addStretch()
         return page
@@ -207,6 +242,9 @@ class MainWindow(QMainWindow):
         free_slice = series.append("Free", usage.free)
         used_slice.setColor(QColor("#7D6D6B"))
         free_slice.setColor(QColor("#D8C9B8"))
+        used_slice.setPen(QPen(Qt.PenStyle.NoPen))
+        free_slice.setPen(QPen(Qt.PenStyle.NoPen))
+        # series.setPen not available on QPieSeries in PySide6; set on slices instead
 
         top_margin = -122
         chart = QChart()
@@ -215,10 +253,13 @@ class MainWindow(QMainWindow):
         chart.setBackgroundRoundness(0)
         chart.setMargins(QMargins(0, top_margin, 0, 0))
         chart.legend().setVisible(False)
+        # chart.setPen not available on QChart in PySide6; try theme/outline via style instead
 
         view = QChartView(chart)
         view.setRenderHint(QPainter.RenderHint.Antialiasing)
         view.setFixedSize(360, 360)
+        view.setFrameShape(QFrame.Shape.NoFrame)
+        view.setLineWidth(0)
 
         center = QLabel(
             "<div style='text-align: center;'>"
@@ -234,6 +275,71 @@ class MainWindow(QMainWindow):
         center.setStyleSheet("color: black; background: transparent;")
         center.setGeometry(0, int(top_margin / 2), view.width(), view.height())
         center.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        return view
+
+    def _build_home_to_disk_bar(self, home_usage, disk_usage) -> QChartView:
+        disk_total = disk_usage.total
+        disk_used = disk_usage.used
+        home_used = home_usage.used
+
+        set_home = QBarSet("/home")
+        set_other = QBarSet("Other")
+
+        set_home.setColor(QColor("#7D6D6B"))
+        set_other.setColor(QColor("#B9B0A8"))
+
+        for s in (set_home, set_other):
+            s.setPen(QPen(Qt.PenStyle.NoPen))
+
+        occupied = disk_used
+        if occupied < 0:
+            occupied = 0
+        other = occupied - home_used
+        if other < 0:
+            other = 0
+        if occupied == 0:
+            occupied = 1
+
+        set_home << (home_used * 100.0 / occupied)
+        set_other << (other * 100.0 / occupied)
+
+        series = QBarSeries()
+        series.append(set_home)
+        series.append(set_other)
+        series.setBarWidth(1.2)
+
+        chart = QChart()
+        chart.addSeries(series)
+        chart.setBackgroundBrush(QBrush(QColor("#F7EEE2")))
+        chart.setBackgroundRoundness(0)
+        chart.setMargins(QMargins(0, 0, 0, 0))
+        chart.legend().setVisible(False)
+
+        axis_y = QValueAxis()
+        axis_y.setRange(0, 100)
+        axis_y.setLabelsVisible(False)
+        axis_y.setGridLineVisible(False)
+        axis_y.setLineVisible(False)
+        axis_y.setTitleVisible(False)
+
+        chart.addAxis(axis_y, Qt.AlignmentFlag.AlignLeft)
+        series.attachAxis(axis_y)
+
+        view = QChartView(chart)
+        view.setRenderHint(QPainter.RenderHint.Antialiasing)
+        view.setFixedHeight(50)
+        view.setFrameShape(QFrame.Shape.NoFrame)
+        view.setLineWidth(0)
+
+        home_pct = home_used * 100.0 / occupied
+        other_pct = other * 100.0 / occupied
+        lbl = QLabel(
+            f"<span style='font-size:11px;color:black;'>/home {home_used/(1024**3):.0f}GB ({home_pct:.0f}%) | other {other/(1024**3):.0f}GB ({other_pct:.0f}%) of occupied {occupied/(1024**3):.0f}GB</span>",
+            view,
+        )
+        lbl.setStyleSheet("background: transparent;")
+        lbl.setGeometry(8, 0, view.width() - 16, 20)
+
         return view
 
     def _build_placeholder_page(self, title: str) -> QWidget:
