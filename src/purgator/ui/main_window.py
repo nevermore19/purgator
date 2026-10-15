@@ -3,16 +3,8 @@ from __future__ import annotations
 import shutil
 from pathlib import Path
 
-from PySide6.QtCharts import (
-    QBarSeries,
-    QBarSet,
-    QChart,
-    QChartView,
-    QPieSeries,
-    QValueAxis,
-)
-from PySide6.QtCore import QMargins, QSettings, Qt, QTime
-from PySide6.QtGui import QBrush, QCloseEvent, QColor, QPainter, QPen
+from PySide6.QtCore import QRectF, QSettings, Qt, QTime
+from PySide6.QtGui import QCloseEvent, QColor, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
@@ -49,9 +41,9 @@ NAV_ITEMS = [
     ("overview", "Overview"),
     ("cleanup", "Cleanup"),
     ("applications", "Applications"),
-    ("system_maintenance", "System Maintenance"),
     ("schedule", "Schedule"),
     ("history", "History"),
+    ("whitelist", "Whitelist"),
     ("settings", "Settings"),
 ]
 
@@ -67,11 +59,72 @@ def _page_widget(title: str) -> QWidget:
     return page, layout
 
 
+class _RingChart(QWidget):
+    def __init__(self, used_frac: float, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._used = max(0.0, min(1.0, used_frac))
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.fillRect(self.rect(), QColor("#F7EEE2"))
+
+        side = self.width()
+        band = side * 0.085
+        outer_radius = side * 0.43
+        radius = outer_radius - band / 2
+        cx = self.width() / 2
+        cy = self.height() / 2
+        rect = QRectF(cx - radius, cy - radius, radius * 2, radius * 2)
+
+        track_pen = QPen(QColor("#82716F"))
+        track_pen.setWidthF(band)
+        painter.setPen(track_pen)
+        painter.drawEllipse(rect)
+
+        if self._used >= 1.0:
+            used_pen = QPen(QColor("#4E4242"))
+            used_pen.setWidthF(band)
+            painter.setPen(used_pen)
+            painter.drawEllipse(rect)
+        elif self._used > 0.0:
+            used_pen = QPen(QColor("#4E4242"))
+            used_pen.setWidthF(band)
+            used_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+            painter.setPen(used_pen)
+            span = int(round(self._used * 360 * 16))
+            painter.drawArc(rect, 90 * 16, span)
+        painter.end()
+
+
+class _RatioBar(QWidget):
+    def __init__(self, frac: float, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._frac = max(0.0, min(1.0, frac))
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.fillRect(self.rect(), QColor("#F7EEE2"))
+
+        height = self.height()
+        radius = height / 2
+        painter.setPen(Qt.PenStyle.NoPen)
+
+        painter.setBrush(QColor("#82716F"))
+        painter.drawRoundedRect(QRectF(0, 0, self.width(), height), radius, radius)
+
+        if self._frac > 0.0:
+            painter.setBrush(QColor("#4E4242"))
+            painter.drawRoundedRect(QRectF(0, 0, self.width() * self._frac, height), radius, radius)
+        painter.end()
+
+
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("Purgator")
-        self.resize(960, 680)
+        self.resize(1100, 720)
 
         self.settings = QSettings()
         self.runner = TaskRunner(self)
@@ -86,15 +139,27 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
-        self.header_left = QLabel("Purgator")
-        self.header_left.setFixedWidth(190)
+        self.header_left = QLabel()
+        self.header_left.setFixedWidth(210)
         self.header_left.setStyleSheet(
-            "font-size: 24px; font-weight: 600; padding: 12px 12px 12px 12px; border: 1px solid #CCCCCC; border-left: none; border-top: none; border-right: 1px solid #CCCCCC;"
+            "font-size: 24px; font-weight: 600; padding: 5px 12px 5px 12px; border: 1px solid #BDB6AA; border-left: none; border-top: none; border-right: 1px solid #BDB6AA;"
         )
+        logo_path = (
+            Path(__file__).resolve().parent.parent.parent.parent
+            / "assets" / "icons" / "purgator-logo.svg"
+        )
+        logo = QPixmap(str(logo_path))
         self.header_right = QLabel("Overview")
         self.header_right.setStyleSheet(
-            "font-size: 24px; font-weight: 600; padding: 12px 12px 12px 12px; border: 1px solid #CCCCCC; border-top: none; border-right: none; border-left: none;"
+            "font-size: 24px; font-weight: 600; padding: 12px 12px 12px 12px; border: 1px solid #BDB6AA; border-top: none; border-right: none; border-left: none;"
         )
+        if not logo.isNull():
+            inner_h = self.header_right.sizeHint().height() - 10
+            self.header_left.setPixmap(
+                logo.scaledToHeight(inner_h, Qt.TransformationMode.SmoothTransformation)
+            )
+        else:
+            self.header_left.setText("Purgator")
         header = QHBoxLayout()
         header.setContentsMargins(0, 0, 0, 0)
         header.setSpacing(0)
@@ -110,9 +175,9 @@ class MainWindow(QMainWindow):
         self.stack.addWidget(self._build_overview_page())
         self.stack.addWidget(self._build_cleanup_page())
         self.stack.addWidget(self._build_placeholder_page("Applications"))
-        self.stack.addWidget(self._build_placeholder_page("System Maintenance"))
         self.stack.addWidget(self._build_schedule_page())
         self.stack.addWidget(self._build_placeholder_page("History"))
+        self.stack.addWidget(self._build_placeholder_page("Whitelist"))
         self.stack.addWidget(self._build_placeholder_page("Settings"))
         content.addWidget(self.stack, stretch=1)
 
@@ -138,12 +203,12 @@ class MainWindow(QMainWindow):
 
     def _build_nav(self) -> QListWidget:
         nav = QListWidget()
-        nav.setFixedWidth(190)
+        nav.setFixedWidth(210)
         nav.setStyleSheet(
-            "QListWidget { background: #F7EEE2; border: 1px solid #CCCCCC; border-top: none; border-left: none; border-bottom: none; font-size: 14px; outline: none; }"
-            "QListWidget::item { padding: 10px 12px; border: none; }"
+            "QListWidget { background: #F7EEE2; border: 1px solid #BDB6AA; border-top: none; border-left: none; border-bottom: none; font-size: 17px; outline: none; padding-top: 10px; }"
+            "QListWidget::item { padding: 8px 12px; border: none; }"
             "QListWidget::item:selected { background: #F7EEE2; color: #4E4242; border: none; }"
-            "QListWidget::item:hover { color: #7D6D6B; }"
+            "QListWidget::item:hover { color: #4E4242; }"
             "QListWidget::item:focus { border: none; outline: none; }"
         )
         for item_id, label in NAV_ITEMS:
@@ -205,142 +270,127 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(page)
         layout.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignHCenter)
 
+        box_width = 340
         box = QGroupBox()
-        box.setFixedWidth(400)
+        box.setFixedWidth(box_width)
         box.setStyleSheet(
-            "QGroupBox { background-color: #F7EEE2; border: 1px solid #CCCCCC; }"
+            "QGroupBox { background-color: #F7EEE2; border: 1px solid #BDB6AA; border-radius: 15px; }"
         )
         box_layout = QVBoxLayout(box)
         box_layout.setContentsMargins(10, 10, 10, 4)
-        box_layout.setSpacing(8)
+        box_layout.setSpacing(0)
         box_layout.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignHCenter)
         title = QLabel("Disk usage")
         title.setStyleSheet("font-size: 20px; font-weight: 600; color: black;")
         box_layout.addWidget(title, alignment=Qt.AlignmentFlag.AlignLeft)
-        view = self._build_disk_usage_chart(usage)
-        available = QLabel(f"{usage.free / (1024**3):.0f} GB available", view)
-        available.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        available.setStyleSheet("font-size: 15px; color: black; background: transparent;")
-        available.setGeometry(0, int(view.height() * 0.66), view.width(), 22)
-        available.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        box_layout.addSpacing(0)
+        chart_w = box_width - 20
+        chart_h = int(chart_w * 0.86) + 6
+        view = self._build_disk_usage_chart(usage, chart_w, chart_h)
         box_layout.addWidget(view)
+        available = QLabel(f"{usage.free / (1024**3):.0f} GB available")
+        available.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        available.setStyleSheet("font-size: 16px; color: black; background: transparent;")
+        box_layout.addSpacing(2)
+        box_layout.addWidget(available)
+        box_layout.addSpacing(24)
+        separator = QFrame()
+        separator.setFrameShape(QFrame.Shape.HLine)
+        separator.setFrameShadow(QFrame.Shadow.Plain)
+        separator.setStyleSheet("color: #BDB6AA; background-color: #BDB6AA;")
+        separator.setFixedHeight(1)
+        box_layout.addWidget(separator)
+        box_layout.addSpacing(8)
         bar_view = self._build_home_to_disk_bar(home_usage, usage)
         box_layout.addWidget(bar_view)
-        layout.addWidget(box)
+        box_layout.addSpacing(60)
+
+        right_container = QGroupBox()
+        right_container.setFixedWidth(box_width)
+        right_container.setStyleSheet(
+            "QGroupBox { background-color: #F7EEE2; border: 1px solid #BDB6AA; border-radius: 15px; }"
+        )
+        right_layout = QVBoxLayout(right_container)
+        right_layout.setContentsMargins(10, 10, 10, 4)
+        right_layout.setSpacing(8)
+        right_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+        right_title = QLabel("Scheduled tasks")
+        right_title.setStyleSheet("font-size: 20px; font-weight: 600; color: black;")
+        right_layout.addWidget(right_title, alignment=Qt.AlignmentFlag.AlignLeft)
+        right_container.setFixedHeight(box.sizeHint().height() // 2)
+
+        row = QHBoxLayout()
+        row.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignHCenter)
+        row.setSpacing(60)
+        row.addWidget(box, alignment=Qt.AlignmentFlag.AlignTop)
+        row.addWidget(right_container, alignment=Qt.AlignmentFlag.AlignTop)
+        layout.addLayout(row)
         layout.addStretch()
         return page
 
-    def _build_disk_usage_chart(self, usage) -> QChartView:
+    def _build_disk_usage_chart(self, usage, width: int = 360, height: int = 380) -> QWidget:
         used_gb = usage.used / (1024**3)
-        free_gb = usage.free / (1024**3)
         total_gb = usage.total / (1024**3)
         used_pct = usage.used / usage.total * 100 if usage.total else 0
+        used_frac = usage.used / usage.total if usage.total else 0
 
-        series = QPieSeries()
-        series.setHoleSize(0.6)
-        used_slice = series.append("Used", usage.used)
-        free_slice = series.append("Free", usage.free)
-        used_slice.setColor(QColor("#7D6D6B"))
-        free_slice.setColor(QColor("#D8C9B8"))
-        used_slice.setPen(QPen(Qt.PenStyle.NoPen))
-        free_slice.setPen(QPen(Qt.PenStyle.NoPen))
-        # series.setPen not available on QPieSeries in PySide6; set on slices instead
-
-        top_margin = -122
-        chart = QChart()
-        chart.addSeries(series)
-        chart.setBackgroundBrush(QBrush(QColor("#F7EEE2")))
-        chart.setBackgroundRoundness(0)
-        chart.setMargins(QMargins(0, top_margin, 0, 0))
-        chart.legend().setVisible(False)
-        # chart.setPen not available on QChart in PySide6; try theme/outline via style instead
-
-        view = QChartView(chart)
-        view.setRenderHint(QPainter.RenderHint.Antialiasing)
-        view.setFixedSize(360, 360)
-        view.setFrameShape(QFrame.Shape.NoFrame)
-        view.setLineWidth(0)
+        view = _RingChart(used_frac)
+        view.setFixedSize(width, height)
 
         center = QLabel(
-            "<div style='text-align: center;'>"
-            f"<span style='font-size: 40px; font-weight: 700;'>{used_pct:.0f}%</span>"
-            "<br>"
-            "<span style='font-size: 13px; color: black;'>used</span>"
-            "<br>"
-            f"<span style='font-size: 20px; font-weight: 600;'>{used_gb:.0f} GB / {total_gb:.0f} GB</span>"
-            "</div>",
+            "<table cellpadding='0' cellspacing='0' align='center'>"
+            f"<tr><td align='center' style='line-height: 70%;'><span style='font-size: 40px;'>{used_pct:.0f}%</span></td></tr>"
+            "<tr><td align='center' style='padding-top: 5px; padding-bottom: 10px;'>"
+            "<span style='font-size: 13px; color: black;'>used</span></td></tr>"
+            f"<tr><td align='center'><span style='font-size: 16px;'>{used_gb:.0f} GB / {total_gb:.0f} GB</span></td></tr>"
+            "</table>",
             view,
         )
         center.setAlignment(Qt.AlignmentFlag.AlignCenter)
         center.setStyleSheet("color: black; background: transparent;")
-        center.setGeometry(0, int(top_margin / 2), view.width(), view.height())
+        center.setGeometry(0, 0, width, height)
         center.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         return view
 
-    def _build_home_to_disk_bar(self, home_usage, disk_usage) -> QChartView:
-        disk_total = disk_usage.total
-        disk_used = disk_usage.used
+    def _build_home_to_disk_bar(self, home_usage, disk_usage) -> QWidget:
+        occupied = disk_usage.used
         home_used = home_usage.used
 
-        set_home = QBarSet("/home")
-        set_other = QBarSet("Other")
-
-        set_home.setColor(QColor("#7D6D6B"))
-        set_other.setColor(QColor("#B9B0A8"))
-
-        for s in (set_home, set_other):
-            s.setPen(QPen(Qt.PenStyle.NoPen))
-
-        occupied = disk_used
-        if occupied < 0:
-            occupied = 0
-        other = occupied - home_used
-        if other < 0:
-            other = 0
-        if occupied == 0:
+        if occupied <= 0:
             occupied = 1
 
-        set_home << (home_used * 100.0 / occupied)
-        set_other << (other * 100.0 / occupied)
+        home_frac = home_used / occupied
 
-        series = QBarSeries()
-        series.append(set_home)
-        series.append(set_other)
-        series.setBarWidth(1.2)
+        bar_width = 300
+        bar = _RatioBar(home_frac)
+        bar.setFixedHeight(12)
+        bar.setFixedWidth(bar_width)
 
-        chart = QChart()
-        chart.addSeries(series)
-        chart.setBackgroundBrush(QBrush(QColor("#F7EEE2")))
-        chart.setBackgroundRoundness(0)
-        chart.setMargins(QMargins(0, 0, 0, 0))
-        chart.legend().setVisible(False)
+        section_title = QLabel("Home directory")
+        section_title.setStyleSheet("font-size: 20px; font-weight: 600; color: black; background: transparent;")
+        section_title.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
 
-        axis_y = QValueAxis()
-        axis_y.setRange(0, 100)
-        axis_y.setLabelsVisible(False)
-        axis_y.setGridLineVisible(False)
-        axis_y.setLineVisible(False)
-        axis_y.setTitleVisible(False)
-
-        chart.addAxis(axis_y, Qt.AlignmentFlag.AlignLeft)
-        series.attachAxis(axis_y)
-
-        view = QChartView(chart)
-        view.setRenderHint(QPainter.RenderHint.Antialiasing)
-        view.setFixedHeight(50)
-        view.setFrameShape(QFrame.Shape.NoFrame)
-        view.setLineWidth(0)
-
-        home_pct = home_used * 100.0 / occupied
-        other_pct = other * 100.0 / occupied
-        lbl = QLabel(
-            f"<span style='font-size:11px;color:black;'>/home {home_used/(1024**3):.0f}GB ({home_pct:.0f}%) | other {other/(1024**3):.0f}GB ({other_pct:.0f}%) of occupied {occupied/(1024**3):.0f}GB</span>",
-            view,
-        )
+        lbl = QLabel(f"<span style='font-size:16px;color:black;'>{home_used/(1024**3):.0f} GB</span>")
         lbl.setStyleSheet("background: transparent;")
-        lbl.setGeometry(8, 0, view.width() - 16, 20)
+        lbl.setFixedWidth(bar_width)
+        lbl.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
 
-        return view
+        container = QWidget()
+        vbox = QVBoxLayout(container)
+        vbox.setContentsMargins(0, 0, 0, 12)
+        vbox.setSpacing(0)
+        vbox.addWidget(section_title)
+        vbox.addSpacing(16)
+        vbox.addWidget(lbl, alignment=Qt.AlignmentFlag.AlignHCenter)
+        vbox.addSpacing(4)
+        vbox.addWidget(bar, alignment=Qt.AlignmentFlag.AlignHCenter)
+        vbox.addSpacing(16)
+        pct = QLabel(f"<span style='font-size:16px;color:black;'>{home_frac * 100:.0f}% of disk space is used by your files</span>")
+        pct.setStyleSheet("background: transparent;")
+        pct.setAlignment(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter)
+        vbox.addWidget(pct, alignment=Qt.AlignmentFlag.AlignHCenter)
+
+        return container
 
     def _build_placeholder_page(self, title: str) -> QWidget:
         page, layout = _page_widget(title)
