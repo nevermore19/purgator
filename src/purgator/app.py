@@ -33,6 +33,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.run:
         return run_headless(args.run, args.delete, args.root)
 
+    from PySide6.QtGui import QFont, QIcon
     from PySide6.QtWidgets import QApplication
 
     from purgator.ui import MainWindow
@@ -40,6 +41,14 @@ def main(argv: list[str] | None = None) -> int:
     app = QApplication([sys.argv[0], *qt_args])
     app.setOrganizationName("purgator")
     app.setApplicationName("purgator")
+    font = QFont("Noto Sans")
+    font.setStyleHint(QFont.StyleHint.SansSerif)
+    app.setFont(font)
+    app.setStyleSheet("QWidget { font-family: 'Noto Sans', sans-serif; }")
+    icon_path = Path(__file__).resolve().parent.parent.parent / "assets" / "icons" / "purgator-icon.svg"
+    if not icon_path.exists():
+        icon_path = Path(__file__).resolve().parent / "assets" / "icons" / "purgator-icon.svg"
     window = MainWindow()
+    window.setWindowIcon(QIcon(str(icon_path)))
     window.show()
     return app.exec()
