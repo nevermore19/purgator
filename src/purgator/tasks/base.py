@@ -22,6 +22,10 @@ class TaskResult:
     bytes: int = 0
     dry_run: bool = True
     paths: list[Path] = field(default_factory=list)
+    # the paths that are directories; the rest are plain files
+    directories: set[Path] = field(default_factory=set)
+    # size of every single path
+    sizes: dict[Path, int] = field(default_factory=dict)
 
     def summary(self) -> str:
         verb = "would free" if self.dry_run else "freed"
@@ -34,6 +38,9 @@ class PurgeTask(ABC):
 
     def __init__(self, dry_run: bool = True) -> None:
         self.dry_run = dry_run
+        # When set, the task works on exactly these paths instead of looking
+        # for candidates itself; used when the user picked what to delete.
+        self.only: set[Path] | None = None
 
     @abstractmethod
     def run(self, report: Reporter, is_cancelled: CancelCheck) -> TaskResult: ...

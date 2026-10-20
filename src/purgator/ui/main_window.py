@@ -3,15 +3,22 @@ from __future__ import annotations
 import shutil
 from pathlib import Path
 
-from PySide6.QtCore import QRectF, QSettings, Qt, QTime
-from PySide6.QtGui import QCloseEvent, QColor, QPainter, QPen, QPixmap
+from PySide6.QtCore import QEvent, QPointF, QRectF, QSettings, QSize, Qt, QTime
+from PySide6.QtGui import (
+    QBrush,
+    QCloseEvent,
+    QColor,
+    QPainter,
+    QPainterPath,
+    QPalette,
+    QPen,
+    QPixmap,
+)
 from PySide6.QtWidgets import (
     QAbstractItemView,
-    QCheckBox,
     QComboBox,
     QFileDialog,
     QFrame,
-    QGridLayout,
     QGroupBox,
     QHBoxLayout,
     QHeaderView,
@@ -24,18 +31,49 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QPushButton,
     QStackedWidget,
+    QStyledItemDelegate,
     QTableWidget,
     QTableWidgetItem,
+    QTreeWidget,
+    QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
 )
 
 from purgator.scheduler import CronScheduler, Job
-from purgator.tasks import TASKS, PurgeTask, TaskResult, create_task
+from purgator.tasks import TASKS, PurgeTask, TaskResult, create_task, human_size
 from purgator.tasks.builtin import ProjectBuildsTask
 from purgator.workers import TaskRunner
 
 BUILDS_ROOT_KEY = "tasks/project_builds/root"
+
+# Label of the per-category panel shown on the Cleanup page
+CATEGORY_LABELS = {
+    "user_cache": "User logs",
+    "stale_files": "Stale temp files",
+    "project_builds": "Project builds",
+}
+
+# How many paths to list per category before it starts truncating
+MAX_ROWS = 100
+
+# Backgrounds of the scan result rows: the entries alternate between the two
+STRIPE_COLOR = "#BDB6AA"
+ROW_COLOR = "#F7EEE2"
+
+# Heights of the rows: the category header is a bit taller than the file rows
+CATEGORY_HEIGHT = 36
+FILE_HEIGHT = 28
+
+# Gap between the D/F marker and the path in front of it
+KIND_GAP = "   "
+
+# Width of the column with the check boxes
+CHECK_COLUMN_WIDTH = 34
+
+# Arrow in front of a category name: the dropdown is open or closed
+ARROW_DOWN = "▾"
+ARROW_RIGHT = "▸"
 
 NAV_ITEMS = [
     ("overview", "Overview"),
@@ -48,14 +86,30 @@ NAV_ITEMS = [
 ]
 
 
-def _page_widget(title: str) -> QWidget:
+def _display_path(path: Path) -> str:
+    """Shorten paths inside the home directory: /home/me/x becomes ~/x."""
+    try:
+        home = Path.home()
+    except RuntimeError:  # no home directory on this system
+        return str(path)
+    try:
+        relative = path.relative_to(home)
+    except ValueError:  # outside the home directory
+        return str(path)
+    if str(relative) == ".":
+        return "~"
+    return f"~/{relative}"
+
+
+def _page_widget(title: str, *, with_heading: bool = True) -> QWidget:
     page = QWidget()
     layout = QVBoxLayout(page)
-    heading = QLabel(title)
-    heading.setStyleSheet(
-        "font-size: 22px; font-weight: 600; color: black; padding: 4px 0 12px 4px;"
-    )
-    layout.addWidget(heading)
+    if with_heading:
+        heading = QLabel(title)
+        heading.setStyleSheet(
+            "font-size: 22px; font-weight: 600; color: black; padding: 4px 0 12px 4px;"
+        )
+        layout.addWidget(heading)
     return page, layout
 
 
@@ -120,6 +174,259 @@ class _RatioBar(QWidget):
         painter.end()
 
 
+class _CheckBoxDelegate(QStyledItemDelegate):
+    """Draws the check box in the last column of the result list."""
+
+    def __init__(self, tree: QTreeWidget) -> None:
+        super().__init__(tree)
+
+    def paint(self, painter, option, index) -> None:
+        raw = index.data(Qt.ItemDataRole.CheckStateRole)
+        if raw is None:
+            super().paint(painter, option, index)
+            return
+        state = Qt.CheckState(raw)
+        side = min(option.rect.height() - 10, 16)
+        box = QRectF(
+            option.rect.left() + (option.rect.width() - side) / 2,
+            option.rect.top() + (option.rect.height() - side) / 2,
+            side,
+            side,
+        )
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        # the cell and the empty box keep the background of its row
+        background = index.data(Qt.ItemDataRole.BackgroundRole)
+        row_colour = QColor(ROW_COLOR)
+        if isinstance(background, QBrush):
+            row_colour = background.color()
+        elif isinstance(background, QColor):
+            row_colour = background
+        painter.fillRect(option.rect, row_colour)
+        painter.setPen(QPen(QColor("#4E4242"), 1.4))
+        painter.setBrush(row_colour)
+        painter.drawRoundedRect(box, 3, 3)
+        if state in (Qt.CheckState.Checked, Qt.CheckState.PartiallyChecked):
+            painter.setBrush(QColor("#4E4242"))
+            painter.drawRoundedRect(box, 3, 3)
+            pen = QPen(QColor(ROW_COLOR), 2.0)
+            pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+            painter.setPen(pen)
+            if state == Qt.CheckState.Checked:
+                mark = QPainterPath()
+                mark.moveTo(box.left() + box.width() * 0.24, box.top() + box.height() * 0.52)
+                mark.lineTo(box.left() + box.width() * 0.43, box.top() + box.height() * 0.72)
+                mark.lineTo(box.left() + box.width() * 0.77, box.top() + box.height() * 0.28)
+                painter.drawPath(mark)
+            else:
+                painter.drawLine(
+                    QPointF(box.left() + box.width() * 0.28, box.center().y()),
+                    QPointF(box.right() - box.width() * 0.28, box.center().y()),
+                )
+        painter.restore()
+
+
+class _ResultTree(QTreeWidget):
+    """All scan results in one list: every category is a collapsible dropdown.
+
+    The list is flat: the files of a category sit right under it and the arrow
+    in front of the name shows whether it is open. Closing a category hides
+    only its own rows, so the categories below move up instead of leaving an
+    empty gap in the middle of the list. The check box on the right says what
+    will be deleted.
+    """
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setColumnCount(3)
+        self.setHeaderLabels(["Category", "Found", ""])
+        self.header().setStretchLastSection(False)
+        self.header().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        self.header().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        self.header().setSectionResizeMode(2, QHeaderView.ResizeMode.Fixed)
+        self.header().resizeSection(2, CHECK_COLUMN_WIDTH)
+        self.headerItem().setTextAlignment(
+            1, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
+        self.setItemDelegateForColumn(2, _CheckBoxDelegate(self))
+        self.setRootIsDecorated(False)
+        self.setIndentation(0)
+        self.setExpandsOnDoubleClick(False)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setTextElideMode(Qt.TextElideMode.ElideMiddle)
+        # The scroll bar always keeps its space, so opening a category never
+        # shifts the rows sideways.
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
+        palette = self.palette()
+        palette.setColor(QPalette.ColorRole.Base, QColor(ROW_COLOR))
+        palette.setColor(QPalette.ColorRole.AlternateBase, QColor(ROW_COLOR))
+        # A transparent highlight keeps the row looking the same when it is clicked.
+        palette.setColor(QPalette.ColorRole.Highlight, QColor(0, 0, 0, 0))
+        palette.setColor(QPalette.ColorRole.HighlightedText, QColor("#000000"))
+        self.setPalette(palette)
+        self.setStyleSheet(
+            "QTreeWidget { background: #F7EEE2; border: none; outline: none;"
+            " font-size: 13px; }"
+            "QTreeWidget::item { padding: 3px 2px; }"
+            "QTreeWidget::item:selected { background: transparent; color: black; }"
+            "QHeaderView::section { background: transparent; color: #4E4242;"
+            " border: none; border-bottom: 1px solid #BDB6AA; padding: 4px 6px;"
+            " font-size: 13px; font-weight: 600; }"
+        )
+        self.itemExpanded.connect(self._on_expanded)
+        self.itemCollapsed.connect(self._on_collapsed)
+        self.viewport().installEventFilter(self)
+        self._categories: dict[str, QTreeWidgetItem] = {}
+        self._entries: dict[str, list[Path]] = {}  # every path the task found
+        self._checked: dict[str, set[Path]] = {}  # the ones the user keeps
+
+    def add_category(self, task_id: str, title: str) -> None:
+        """Add a collapsible row for a task; its files are listed under it."""
+        item = QTreeWidgetItem(self, [f"{ARROW_DOWN} {title}", "Not scanned yet", ""])
+        font = item.font(0)
+        font.setBold(True)
+        font.setPixelSize(16)
+        item.setFont(0, font)
+        item.setTextAlignment(1, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        item.setSizeHint(0, QSize(0, CATEGORY_HEIGHT))  # a bit taller than the file rows
+        item.setExpanded(True)  # the dropdown starts open, like the old sections
+        item.setData(0, Qt.ItemDataRole.UserRole, title)
+        item.setData(2, Qt.ItemDataRole.UserRole, task_id)
+        item.setCheckState(2, Qt.CheckState.Unchecked)
+        self._categories[task_id] = item
+        self._paint(item, ROW_COLOR)
+
+    def _paint(self, item: QTreeWidgetItem, colour: str) -> None:
+        brush = QColor(colour)
+        item.setBackground(0, brush)
+        item.setBackground(1, brush)
+        item.setBackground(2, brush)
+
+    def _paint_files(self, category: QTreeWidgetItem) -> None:
+        """The files of a category alternate; the header stays plain."""
+        for index in range(category.childCount()):
+            colour = STRIPE_COLOR if index % 2 else ROW_COLOR
+            self._paint(category.child(index), colour)
+
+    def eventFilter(self, obj, event) -> bool:
+        """Clicking a category header opens or closes it, the check box selects."""
+        if obj is self.viewport() and event.type() == QEvent.Type.MouseButtonPress:
+            position = event.position().toPoint()
+            index = self.indexAt(position)
+            item = self.itemFromIndex(index) if index.isValid() else None
+            if item is not None:
+                if index.column() == 2:
+                    self._toggle(item)
+                    return True
+                if item.parent() is None:
+                    item.setExpanded(not item.isExpanded())
+                    return True
+        return super().eventFilter(obj, event)
+
+    def _toggle(self, item: QTreeWidgetItem) -> None:
+        """Check or uncheck a row: a category toggles all of its files."""
+        parent = item.parent()
+        if parent is None:
+            self._toggle_category(item.data(2, Qt.ItemDataRole.UserRole))
+        else:
+            self._toggle_path(parent.data(2, Qt.ItemDataRole.UserRole), item)
+
+    def _toggle_category(self, task_id: str) -> None:
+        paths = self._entries.get(task_id, [])
+        checked = self._checked.setdefault(task_id, set())
+        if paths and len(checked) == len(paths):
+            checked.clear()  # everything was checked: uncheck it all
+        else:
+            checked.update(paths)
+        self._sync(task_id)
+
+    def _toggle_path(self, task_id: str, item: QTreeWidgetItem) -> None:
+        path = item.data(2, Qt.ItemDataRole.UserRole)
+        checked = self._checked.setdefault(task_id, set())
+        if path in checked:
+            checked.discard(path)
+        else:
+            checked.add(path)
+        self._sync(task_id)
+
+    def _sync(self, task_id: str) -> None:
+        """Copy the selection back into the check boxes of the rows."""
+        category = self._categories.get(task_id)
+        if category is None:
+            return
+        paths = self._entries.get(task_id, [])
+        checked = self._checked.get(task_id, set())
+        if not paths:
+            state = Qt.CheckState.Unchecked
+        elif len(checked) == len(paths):
+            state = Qt.CheckState.Checked
+        elif checked:
+            state = Qt.CheckState.PartiallyChecked
+        else:
+            state = Qt.CheckState.Unchecked
+        category.setCheckState(2, state)
+        for index in range(category.childCount()):
+            child = category.child(index)
+            path = child.data(2, Qt.ItemDataRole.UserRole)
+            if path is None:
+                continue
+            child.setCheckState(
+                2,
+                Qt.CheckState.Checked if path in checked else Qt.CheckState.Unchecked,
+            )
+
+    def checked_paths(self, task_id: str) -> set[Path]:
+        """The paths of a task the user wants to delete."""
+        return set(self._checked.get(task_id, set()))
+
+    def _on_expanded(self, item: QTreeWidgetItem) -> None:
+        self._set_arrow(item, ARROW_DOWN)
+
+    def _on_collapsed(self, item: QTreeWidgetItem) -> None:
+        self._set_arrow(item, ARROW_RIGHT)
+
+    def _set_arrow(self, item: QTreeWidgetItem, arrow: str) -> None:
+        title = item.data(0, Qt.ItemDataRole.UserRole)
+        if title:
+            item.setText(0, f"{arrow} {title}")
+
+    def reset(self, status: str) -> None:
+        for task_id, item in self._categories.items():
+            item.setText(1, status)
+            self._clear_children(item)
+            self._entries.pop(task_id, None)
+            self._checked.pop(task_id, None)
+            item.setCheckState(2, Qt.CheckState.Unchecked)
+
+    def show_result(self, result: TaskResult) -> None:
+        item = self._categories.get(result.task_id)
+        if item is None:
+            return
+        files = f"{result.files} file" if result.files == 1 else f"{result.files} files"
+        item.setText(1, f"{human_size(result.bytes)} · {files}")
+        self._clear_children(item)
+        self._entries[result.task_id] = list(result.paths)
+        self._checked[result.task_id] = set(result.paths)
+        for path in result.paths[:MAX_ROWS]:
+            kind = "D" if path in result.directories else "F"
+            size = human_size(result.sizes.get(path, 0))
+            child = QTreeWidgetItem(item, [f"{kind}{KIND_GAP}{_display_path(path)}", size, ""])
+            child.setData(2, Qt.ItemDataRole.UserRole, path)
+            child.setCheckState(2, Qt.CheckState.Checked)
+            child.setTextAlignment(1, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            child.setSizeHint(0, QSize(0, FILE_HEIGHT))
+        if len(result.paths) > MAX_ROWS:
+            more = QTreeWidgetItem(item, [f"… and {len(result.paths) - MAX_ROWS} more", "", ""])
+            more.setSizeHint(0, QSize(0, FILE_HEIGHT))
+        self._paint_files(item)
+        self._sync(result.task_id)
+
+    @staticmethod
+    def _clear_children(item: QTreeWidgetItem) -> None:
+        # takeChildren() hands the rows over to Python, so dropping them deletes them.
+        item.takeChildren()
+
+
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
@@ -132,6 +439,12 @@ class MainWindow(QMainWindow):
 
         self.buttons: dict[str, QPushButton] = {}
         self.bars: dict[str, QProgressBar] = {}
+        self.results = _ResultTree()
+        self._active_action: str | None = None  # "scan" / "cleanup" while a run is in flight
+        self._starting = False  # True while _run_all_tasks is still queueing tasks
+        self._found_bytes = 0  # size of the files the last run found
+        self._found_files = 0  # number of those files
+        self._found_categories = 0  # number of tasks that found something
 
         central = QWidget()
         central.setStyleSheet("background-color: #F7EEE2; color: black;")
@@ -288,7 +601,7 @@ class MainWindow(QMainWindow):
         chart_h = int(chart_w * 0.86) + 6
         view = self._build_disk_usage_chart(usage, chart_w, chart_h)
         box_layout.addWidget(view)
-        available = QLabel(f"{usage.free / (1024**3):.0f} GB available")
+        available = QLabel(f"{usage.free / (1024**3):.0f} GiB available")
         available.setAlignment(Qt.AlignmentFlag.AlignCenter)
         available.setStyleSheet("font-size: 16px; color: black; background: transparent;")
         box_layout.addSpacing(2)
@@ -342,7 +655,7 @@ class MainWindow(QMainWindow):
             f"<tr><td align='center' style='line-height: 70%;'><span style='font-size: 40px;'>{used_pct:.0f}%</span></td></tr>"
             "<tr><td align='center' style='padding-top: 5px; padding-bottom: 10px;'>"
             "<span style='font-size: 13px; color: black;'>used</span></td></tr>"
-            f"<tr><td align='center'><span style='font-size: 16px;'>{used_gb:.0f} GB / {total_gb:.0f} GB</span></td></tr>"
+            f"<tr><td align='center'><span style='font-size: 16px;'>{used_gb:.0f} GiB / {total_gb:.0f} GiB</span></td></tr>"
             "</table>",
             view,
         )
@@ -370,7 +683,7 @@ class MainWindow(QMainWindow):
         section_title.setStyleSheet("font-size: 20px; font-weight: 600; color: black; background: transparent;")
         section_title.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
 
-        lbl = QLabel(f"<span style='font-size:16px;color:black;'>{home_used/(1024**3):.0f} GB</span>")
+        lbl = QLabel(f"<span style='font-size:16px;color:black;'>{home_used/(1024**3):.0f} GiB</span>")
         lbl.setStyleSheet("background: transparent;")
         lbl.setFixedWidth(bar_width)
         lbl.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
@@ -401,37 +714,68 @@ class MainWindow(QMainWindow):
         return page
 
     def _build_cleanup_page(self) -> QWidget:
-        page, layout = _page_widget("Cleanup")
-        layout.addWidget(self._build_tasks_box())
+        # "Cleanup" appears only in the top header, not as a page heading.
+        page, layout = _page_widget("Cleanup", with_heading=False)
+        layout.addLayout(self._build_cleanup_actions())
+        layout.addWidget(self._build_categories())
         layout.addStretch()
         return page
 
-    def _build_tasks_box(self) -> QGroupBox:
-        box = QGroupBox("Tasks")
-        grid = QGridLayout(box)
-        for row, (task_id, cls) in enumerate(TASKS.items()):
-            button = QPushButton(cls.name)
-            button.clicked.connect(lambda _=False, t=task_id: self.start_task(t))
-            bar = QProgressBar()
-            bar.setRange(0, 100)
-            bar.setValue(0)
-            bar.setFormat("idle")
-            grid.addWidget(button, row, 0)
-            grid.addWidget(bar, row, 1)
-            self.buttons[task_id] = button
-            self.bars[task_id] = bar
-        grid.setColumnStretch(1, 1)
+    def _build_categories(self) -> QWidget:
+        container = QFrame()
+        container.setObjectName("categoryBox")
+        container.setStyleSheet(
+            "QFrame#categoryBox { background-color: #F7EEE2;"
+            " border: 1px solid #BDB6AA; border-radius: 15px; }"
+            "QLabel { background: transparent; border: none; }"
+        )
+        container.setFixedHeight(520)
 
-        controls = QHBoxLayout()
-        self.dry_run = QCheckBox("Dry run (only report, don't delete)")
-        self.dry_run.setChecked(True)
-        cancel = QPushButton("Cancel all")
-        cancel.clicked.connect(self.runner.cancel_all)
-        controls.addWidget(self.dry_run)
-        controls.addStretch()
-        controls.addWidget(cancel)
-        grid.addLayout(controls, len(TASKS), 0, 1, 2)
-        return box
+        column = QVBoxLayout(container)
+        column.setContentsMargins(14, 10, 14, 14)
+        column.setSpacing(8)
+
+        for task_id, cls in TASKS.items():
+            self.results.add_category(task_id, CATEGORY_LABELS.get(task_id, cls.name))
+        column.addWidget(self.results, stretch=1)
+        return container
+
+    def _build_cleanup_actions(self) -> QHBoxLayout:
+        row = QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 12)
+        row.setSpacing(12)
+
+        self.info_label = QLabel("Nothing scanned yet")
+        self.info_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        self.info_label.setStyleSheet(
+            "font-size: 19px; color: black; background: transparent;"
+        )
+        row.addWidget(self.info_label)
+        row.addStretch()
+
+        self.scan_button = QPushButton("Scan")
+        self.scan_button.setStyleSheet(
+            "QPushButton { background-color: #F7EEE2; color: #4E4242;"
+            " border: 1px solid #4E4242; border-radius: 15px;"
+            " padding: 4px 22px; font-size: 18px; }"
+            "QPushButton:hover { background-color: #EDE2D1; }"
+            "QPushButton:disabled { color: #A79E92; border-color: #A79E92; }"
+        )
+        self.scan_button.clicked.connect(lambda: self._on_action_clicked("scan"))
+
+        self.cleanup_button = QPushButton("Clean up")
+        self.cleanup_button.setStyleSheet(
+            "QPushButton { background-color: #4E4242; color: #F7EEE2;"
+            " border: 1px solid #4E4242; border-radius: 15px;"
+            " padding: 4px 22px; font-size: 18px; }"
+            "QPushButton:hover { background-color: #5C4E4E; }"
+            "QPushButton:disabled { background-color: #9C9393; border-color: #9C9393; }"
+        )
+        self.cleanup_button.clicked.connect(lambda: self._on_action_clicked("cleanup"))
+
+        row.addWidget(self.scan_button)
+        row.addWidget(self.cleanup_button)
+        return row
 
     def log(self, message: str) -> None:
         stamp = QTime.currentTime().toString("HH:mm:ss")
@@ -473,12 +817,86 @@ class MainWindow(QMainWindow):
         layout.addLayout(row)
         return box
 
-    def make_task(self, task_id: str) -> PurgeTask:
-        dry = self.dry_run.isChecked()
+    def make_task(self, task_id: str, dry_run: bool = False) -> PurgeTask:
         if task_id == ProjectBuildsTask.id:
             root = self.settings.value(BUILDS_ROOT_KEY, str(Path.home()))
-            return create_task(task_id, dry_run=dry, root=Path(root))
-        return create_task(task_id, dry_run=dry)
+            return create_task(task_id, dry_run=dry_run, root=Path(root))
+        return create_task(task_id, dry_run=dry_run)
+
+    def _on_action_clicked(self, action: str) -> None:
+        """The button shows 'Cancel' while it is the one running: cancel instead."""
+        if self._active_action is not None:
+            if self._active_action == action:
+                self.runner.cancel_all()
+            return
+        if action == "scan":
+            self._scan_all()
+        else:
+            self._cleanup_all()
+
+    def _scan_all(self) -> None:
+        """Report what every task would delete, without touching anything."""
+        self._active_action = "scan"
+        self._reset_found("Scanning…")
+        self._run_all_tasks(dry_run=True)
+
+    def _cleanup_all(self) -> None:
+        """Delete the checked entries, after asking for confirmation."""
+        selection = {task_id: self.results.checked_paths(task_id) for task_id in TASKS}
+        count = sum(len(paths) for paths in selection.values())
+        if not count:
+            QMessageBox.information(
+                self,
+                "Nothing selected",
+                "No files are selected. Tick the files you want to delete first.",
+            )
+            return
+        answer = QMessageBox.warning(
+            self,
+            "Delete files?",
+            f"Cleaning up will permanently delete {count} selected entries. Continue?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self._active_action = "cleanup"
+        self._reset_found("Cleaning up…")
+        self._run_all_tasks(dry_run=False, selection=selection)
+
+    def _reset_found(self, status: str) -> None:
+        self._found_bytes = 0
+        self._found_files = 0
+        self._found_categories = 0
+        self.info_label.setText(status)
+        self.results.reset(status)
+
+    def _add_found(self, result: TaskResult) -> None:
+        """Add a finished task to the totals shown next to the buttons."""
+        self._found_bytes += result.bytes
+        self._found_files += result.files
+        if result.files:
+            self._found_categories += 1
+        files = f"{self._found_files} file" if self._found_files == 1 else f"{self._found_files} files"
+        categories = (
+            "1 category" if self._found_categories == 1 else f"{self._found_categories} categories"
+        )
+        self.info_label.setText(
+            f"Found {human_size(self._found_bytes)}\n{files} selected across {categories}"
+        )
+
+    def _run_all_tasks(
+        self, dry_run: bool, selection: dict[str, set[Path]] | None = None
+    ) -> None:
+        self._starting = True
+        try:
+            for task_id in TASKS:
+                task = self.make_task(task_id, dry_run=dry_run)
+                if selection is not None:
+                    task.only = selection.get(task_id, set())
+                self.runner.run(task)
+        finally:
+            self._starting = False
+        self._on_running_changed(self.runner.running_count)
 
     def start_task(self, task_id: str) -> None:
         if self.runner.is_running(task_id):
@@ -490,35 +908,34 @@ class MainWindow(QMainWindow):
             if not root:
                 return
             self.settings.setValue(BUILDS_ROOT_KEY, root)
-        if not self.dry_run.isChecked():
-            answer = QMessageBox.warning(
-                self,
-                "Delete files?",
-                f"“{TASKS[task_id].name}” will permanently delete files. Continue?",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            )
-            if answer != QMessageBox.StandardButton.Yes:
-                return
+        answer = QMessageBox.warning(
+            self,
+            "Delete files?",
+            f"“{TASKS[task_id].name}” will permanently delete files. Continue?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
         self.runner.run(self.make_task(task_id))
 
-    def log(self, message: str) -> None:
-        stamp = QTime.currentTime().toString("HH:mm:ss")
-        self.log_view.appendPlainText(f"[{stamp}] {message}")
-
     def _set_idle(self, task_id: str, text: str) -> None:
-        bar = self.bars[task_id]
-        bar.setRange(0, 100)
-        bar.setFormat(text)
-        self.buttons[task_id].setText(TASKS[task_id].name)
+        if bar := self.bars.get(task_id):
+            bar.setRange(0, 100)
+            bar.setFormat(text)
+        if button := self.buttons.get(task_id):
+            button.setText(TASKS[task_id].name)
 
     def _on_started(self, task_id: str) -> None:
-        bar = self.bars[task_id]
-        bar.setRange(0, 0)  # busy indicator until first percentage arrives
-        self.buttons[task_id].setText(f"Cancel: {TASKS[task_id].name}")
+        if bar := self.bars.get(task_id):
+            bar.setRange(0, 0)  # busy indicator until first percentage arrives
+        if button := self.buttons.get(task_id):
+            button.setText(f"Cancel: {TASKS[task_id].name}")
         self.log(f"{task_id}: started")
 
     def _on_progress(self, task_id: str, percent: int, message: str) -> None:
-        bar = self.bars[task_id]
+        bar = self.bars.get(task_id)
+        if bar is None:
+            return
         if percent < 0:
             bar.setRange(0, 0)
         else:
@@ -528,8 +945,11 @@ class MainWindow(QMainWindow):
         bar.setToolTip(message)
 
     def _on_finished(self, task_id: str, result: TaskResult) -> None:
-        self.bars[task_id].setValue(100)
+        if bar := self.bars.get(task_id):
+            bar.setValue(100)
         self._set_idle(task_id, "done")
+        self._add_found(result)
+        self.results.show_result(result)
         self.log(result.summary())
         for path in result.paths[:20]:
             self.log(f"    {path}")
@@ -541,12 +961,22 @@ class MainWindow(QMainWindow):
         self.log(f"{task_id}: FAILED\n{error}")
 
     def _on_cancelled(self, task_id: str) -> None:
-        self.bars[task_id].setValue(0)
+        if bar := self.bars.get(task_id):
+            bar.setValue(0)
         self._set_idle(task_id, "cancelled")
         self.log(f"{task_id}: cancelled")
 
     def _on_running_changed(self, count: int) -> None:
         self.running_label.setText(f"{count} task(s) running" if count else "Idle")
+        busy = count > 0
+        if not busy and not self._starting:
+            self._active_action = None  # run is over: the buttons get their labels back
+        # The button that started the run turns into "Cancel"; the other one stays disabled.
+        self.scan_button.setText("Cancel" if self._active_action == "scan" else "Scan")
+        self.cleanup_button.setText("Cancel" if self._active_action == "cleanup" else "Clean up")
+        running = busy or self._starting
+        self.scan_button.setEnabled(not running or self._active_action == "scan")
+        self.cleanup_button.setEnabled(not running or self._active_action == "cleanup")
 
     # --- schedule -----------------------------------------------------------
 
