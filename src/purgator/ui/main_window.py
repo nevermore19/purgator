@@ -30,7 +30,9 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QProgressBar,
     QPushButton,
+    QScrollBar,
     QStackedWidget,
+    QStyle,
     QStyledItemDelegate,
     QTableWidget,
     QTableWidgetItem,
@@ -54,9 +56,6 @@ CATEGORY_LABELS = {
     "project_builds": "Project builds",
 }
 
-# How many paths to list per category before it starts truncating
-MAX_ROWS = 100
-
 # Backgrounds of the scan result rows: the entries alternate between the two
 STRIPE_COLOR = "#BDB6AA"
 ROW_COLOR = "#F7EEE2"
@@ -74,6 +73,12 @@ CHECK_COLUMN_WIDTH = 34
 # Arrow in front of a category name: the dropdown is open or closed
 ARROW_DOWN = "▾"
 ARROW_RIGHT = "▸"
+
+# Width of the custom scroll bar used by the scan result list
+SCROLLBAR_WIDTH = 8
+
+# Colour of the scroll bar handle
+SCROLLBAR_COLOR = "#837270"
 
 NAV_ITEMS = [
     ("overview", "Overview"),
@@ -174,16 +179,35 @@ class _RatioBar(QWidget):
         painter.end()
 
 
-class _CheckBoxDelegate(QStyledItemDelegate):
-    """Draws the check box in the last column of the result list."""
+class _RowDelegate(QStyledItemDelegate):
+    """Paints every row with its own background colour and draws the check box.
+
+    The selection highlight would replace the row colour with the base colour,
+    so the "selected" state is dropped before the default painting runs.
+    """
 
     def __init__(self, tree: QTreeWidget) -> None:
         super().__init__(tree)
 
+    @staticmethod
+    def _row_colour(index) -> QColor:
+        background = index.data(Qt.ItemDataRole.BackgroundRole)
+        if isinstance(background, QBrush):
+            return background.color()
+        if isinstance(background, QColor):
+            return background
+        return QColor(ROW_COLOR)
+
     def paint(self, painter, option, index) -> None:
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        row_colour = self._row_colour(index)
+        painter.fillRect(option.rect, row_colour)
         raw = index.data(Qt.ItemDataRole.CheckStateRole)
         if raw is None:
+            option.state &= ~QStyle.StateFlag.State_Selected
             super().paint(painter, option, index)
+            painter.restore()
             return
         state = Qt.CheckState(raw)
         side = min(option.rect.height() - 10, 16)
@@ -193,16 +217,6 @@ class _CheckBoxDelegate(QStyledItemDelegate):
             side,
             side,
         )
-        painter.save()
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        # the cell and the empty box keep the background of its row
-        background = index.data(Qt.ItemDataRole.BackgroundRole)
-        row_colour = QColor(ROW_COLOR)
-        if isinstance(background, QBrush):
-            row_colour = background.color()
-        elif isinstance(background, QColor):
-            row_colour = background
-        painter.fillRect(option.rect, row_colour)
         painter.setPen(QPen(QColor("#4E4242"), 1.4))
         painter.setBrush(row_colour)
         painter.drawRoundedRect(box, 3, 3)
@@ -224,6 +238,24 @@ class _CheckBoxDelegate(QStyledItemDelegate):
                     QPointF(box.right() - box.width() * 0.28, box.center().y()),
                 )
         painter.restore()
+
+
+class _ThinScrollBar(QScrollBar):
+    """A slim scroll bar with a plain handle in the accent colour."""
+
+    def __init__(self, orientation: Qt.Orientation, parent: QWidget | None = None) -> None:
+        super().__init__(orientation, parent)
+        self.setFixedWidth(SCROLLBAR_WIDTH)
+        self.setStyleSheet(
+            f"QScrollBar {{ background: transparent; width: {SCROLLBAR_WIDTH}px; }}"
+            f"QScrollBar::handle:vertical {{ background: {SCROLLBAR_COLOR};"
+            " border-radius: 3px; min-height: 30px; }"
+            "QScrollBar::handle:vertical:hover { background: #6E605E; }"
+            "QScrollBar::handle:horizontal { background: transparent; }"
+            "QScrollBar::add-line, QScrollBar::sub-line,"
+            " QScrollBar::add-page, QScrollBar::sub-page { background: transparent;"
+            " border: none; height: 0; width: 0; }"
+        )
 
 
 class _ResultTree(QTreeWidget):
@@ -248,7 +280,7 @@ class _ResultTree(QTreeWidget):
         self.headerItem().setTextAlignment(
             1, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
         )
-        self.setItemDelegateForColumn(2, _CheckBoxDelegate(self))
+        self.setItemDelegate(_RowDelegate(self))
         self.setRootIsDecorated(False)
         self.setIndentation(0)
         self.setExpandsOnDoubleClick(False)
@@ -257,6 +289,7 @@ class _ResultTree(QTreeWidget):
         # The scroll bar always keeps its space, so opening a category never
         # shifts the rows sideways.
         self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
+        self.setVerticalScrollBar(_ThinScrollBar(Qt.Orientation.Vertical, self))
         palette = self.palette()
         palette.setColor(QPalette.ColorRole.Base, QColor(ROW_COLOR))
         palette.setColor(QPalette.ColorRole.AlternateBase, QColor(ROW_COLOR))
@@ -270,7 +303,7 @@ class _ResultTree(QTreeWidget):
             "QTreeWidget::item { padding: 3px 2px; }"
             "QTreeWidget::item:selected { background: transparent; color: black; }"
             "QHeaderView::section { background: transparent; color: #4E4242;"
-            " border: none; border-bottom: 1px solid #BDB6AA; padding: 4px 6px;"
+            " border: none; border-bottom: 1px solid #BDB6AA; padding: 2px 6px 4px 6px;"
             " font-size: 13px; font-weight: 600; }"
         )
         self.itemExpanded.connect(self._on_expanded)
@@ -407,7 +440,7 @@ class _ResultTree(QTreeWidget):
         self._clear_children(item)
         self._entries[result.task_id] = list(result.paths)
         self._checked[result.task_id] = set(result.paths)
-        for path in result.paths[:MAX_ROWS]:
+        for path in result.paths:
             kind = "D" if path in result.directories else "F"
             size = human_size(result.sizes.get(path, 0))
             child = QTreeWidgetItem(item, [f"{kind}{KIND_GAP}{_display_path(path)}", size, ""])
@@ -415,9 +448,6 @@ class _ResultTree(QTreeWidget):
             child.setCheckState(2, Qt.CheckState.Checked)
             child.setTextAlignment(1, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
             child.setSizeHint(0, QSize(0, FILE_HEIGHT))
-        if len(result.paths) > MAX_ROWS:
-            more = QTreeWidgetItem(item, [f"… and {len(result.paths) - MAX_ROWS} more", "", ""])
-            more.setSizeHint(0, QSize(0, FILE_HEIGHT))
         self._paint_files(item)
         self._sync(result.task_id)
 
@@ -717,8 +747,7 @@ class MainWindow(QMainWindow):
         # "Cleanup" appears only in the top header, not as a page heading.
         page, layout = _page_widget("Cleanup", with_heading=False)
         layout.addLayout(self._build_cleanup_actions())
-        layout.addWidget(self._build_categories())
-        layout.addStretch()
+        layout.addWidget(self._build_categories(), stretch=1)
         return page
 
     def _build_categories(self) -> QWidget:
@@ -729,10 +758,9 @@ class MainWindow(QMainWindow):
             " border: 1px solid #BDB6AA; border-radius: 15px; }"
             "QLabel { background: transparent; border: none; }"
         )
-        container.setFixedHeight(520)
 
         column = QVBoxLayout(container)
-        column.setContentsMargins(14, 10, 14, 14)
+        column.setContentsMargins(14, 2, 14, 14)
         column.setSpacing(8)
 
         for task_id, cls in TASKS.items():
