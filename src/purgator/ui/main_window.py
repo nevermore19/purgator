@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import shutil
+from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, QPointF, QRectF, QSettings, QSize, Qt, QTime
+from PySide6.QtCore import QDate, QEvent, QPointF, QRectF, QSettings, QSize, Qt, QTime, Signal
 from PySide6.QtGui import (
     QBrush,
     QCloseEvent,
@@ -17,13 +18,15 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QComboBox,
+    QDateEdit,
+    QDialog,
     QFileDialog,
+    QFormLayout,
     QFrame,
     QGroupBox,
     QHBoxLayout,
     QHeaderView,
     QLabel,
-    QLineEdit,
     QListWidget,
     QListWidgetItem,
     QMainWindow,
@@ -31,6 +34,7 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QPushButton,
     QScrollBar,
+    QSpinBox,
     QStackedWidget,
     QStyle,
     QStyledItemDelegate,
@@ -38,14 +42,22 @@ from PySide6.QtWidgets import (
     QTableWidgetItem,
     QTreeWidget,
     QTreeWidgetItem,
+    QTimeEdit,
     QVBoxLayout,
     QWidget,
 )
 
+from purgator.apps import (
+    Application,
+    discover_applications,
+    remove_application,
+)
 from purgator.scheduler import CronScheduler, Job
-from purgator.tasks import TASKS, PurgeTask, TaskResult, create_task, human_size
+from purgator.tasks import TASKS, Cancelled, PurgeTask, TaskResult, create_task, human_size
 from purgator.tasks.builtin import ProjectBuildsTask
-from purgator.workers import TaskRunner
+from purgator.usage import describe as describe_usage
+from purgator.usage import describe_exact, is_old
+from purgator.workers import TaskRunner, Worker
 
 BUILDS_ROOT_KEY = "tasks/project_builds/root"
 
@@ -70,6 +82,17 @@ KIND_GAP = "   "
 # Width of the column with the check boxes
 CHECK_COLUMN_WIDTH = 34
 
+# The room between the size of an application and the day it was used
+COLUMN_GAP_WIDTH = 14
+
+# The columns of the list of applications
+NAME_COLUMN = 0
+SOURCE_COLUMN = 1
+SIZE_COLUMN = 2
+GAP_COLUMN = 3
+LAST_USED_COLUMN = 4
+CHECK_COLUMN = 5
+
 # Arrow in front of a category name: the dropdown is open or closed
 ARROW_DOWN = "▾"
 ARROW_RIGHT = "▸"
@@ -79,6 +102,34 @@ SCROLLBAR_WIDTH = 8
 
 # Colour of the scroll bar handle
 SCROLLBAR_COLOR = "#837270"
+
+# The look of the result lists
+TREE_STYLE = (
+    "QTreeWidget { background: #F7EEE2; border: none; outline: none;"
+    " font-size: 13px; }"
+    "QTreeWidget::item { padding: 3px 2px; }"
+    "QTreeWidget::item:selected { background: transparent; color: black; }"
+    "QHeaderView::section { background: transparent; color: #4E4242;"
+    " border: none; border-bottom: 1px solid #BDB6AA; padding: 2px 6px 4px 6px;"
+    " font-size: 13px; font-weight: 600; }"
+)
+
+# The two kinds of buttons: the plain one and the one that does the work
+PLAIN_BUTTON_STYLE = (
+    "QPushButton { background-color: #F7EEE2; color: #4E4242;"
+    " border: 1px solid #4E4242; border-radius: 15px;"
+    " padding: 4px 22px; font-size: 18px; }"
+    "QPushButton:hover { background-color: #EDE2D1; }"
+    "QPushButton:disabled { color: #A79E92; border-color: #A79E92; }"
+)
+
+PRIMARY_BUTTON_STYLE = (
+    "QPushButton { background-color: #4E4242; color: #F7EEE2;"
+    " border: 1px solid #4E4242; border-radius: 15px;"
+    " padding: 4px 22px; font-size: 18px; }"
+    "QPushButton:hover { background-color: #5C4E4E; }"
+    "QPushButton:disabled { background-color: #9C9393; border-color: #9C9393; }"
+)
 
 NAV_ITEMS = [
     ("overview", "Overview"),
@@ -104,6 +155,14 @@ def _display_path(path: Path) -> str:
     if str(relative) == ".":
         return "~"
     return f"~/{relative}"
+
+
+def _usage_tip(app: Application) -> str:
+    """Say where the moment of the last use comes from."""
+    if app.last_used <= 0:
+        return "never used, as far as the system knows"
+    source = app.used_from or "the last time it was used"
+    return f"{source}, on {describe_exact(app.last_used)}"
 
 
 def _page_widget(title: str, *, with_heading: bool = True) -> QWidget:
@@ -240,6 +299,48 @@ class _RowDelegate(QStyledItemDelegate):
         painter.restore()
 
 
+class _Switch(QWidget):
+    """A small on/off switch used to enable a scheduled task."""
+
+    toggled = Signal(bool)
+
+    def __init__(self, checked: bool = False, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._checked = checked
+        self.setFixedSize(38, 20)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+
+    def isChecked(self) -> bool:
+        return self._checked
+
+    def setChecked(self, checked: bool) -> None:
+        if checked != self._checked:
+            self._checked = checked
+            self.update()
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._checked = not self._checked
+            self.update()
+            self.toggled.emit(self._checked)
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(Qt.PenStyle.NoPen)
+        radius = self.height() / 2
+        painter.setBrush(QColor("#4E4242") if self._checked else QColor("#BDB6AA"))
+        painter.drawRoundedRect(QRectF(0, 0, self.width(), self.height()), radius, radius)
+        diameter = self.height() - 4
+        left = self.width() - diameter - 2 if self._checked else 2
+        painter.setBrush(QColor("#F7EEE2"))
+        painter.drawEllipse(QRectF(left, 2, diameter, diameter))
+        painter.end()
+
+
 class _ThinScrollBar(QScrollBar):
     """A slim scroll bar with a plain handle in the accent colour."""
 
@@ -297,15 +398,7 @@ class _ResultTree(QTreeWidget):
         palette.setColor(QPalette.ColorRole.Highlight, QColor(0, 0, 0, 0))
         palette.setColor(QPalette.ColorRole.HighlightedText, QColor("#000000"))
         self.setPalette(palette)
-        self.setStyleSheet(
-            "QTreeWidget { background: #F7EEE2; border: none; outline: none;"
-            " font-size: 13px; }"
-            "QTreeWidget::item { padding: 3px 2px; }"
-            "QTreeWidget::item:selected { background: transparent; color: black; }"
-            "QHeaderView::section { background: transparent; color: #4E4242;"
-            " border: none; border-bottom: 1px solid #BDB6AA; padding: 2px 6px 4px 6px;"
-            " font-size: 13px; font-weight: 600; }"
-        )
+        self.setStyleSheet(TREE_STYLE)
         self.itemExpanded.connect(self._on_expanded)
         self.itemCollapsed.connect(self._on_collapsed)
         self.viewport().installEventFilter(self)
@@ -457,6 +550,347 @@ class _ResultTree(QTreeWidget):
         item.takeChildren()
 
 
+class _ApplicationList(QTreeWidget):
+    """The installed applications, one flat row per application.
+
+    There are no categories here: every application stands on its own and the
+    check box on the right says which of them will be removed. The column of the
+    last use says when the application was open for the last time; the ones
+    that were not used for a long time come first.
+    """
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setColumnCount(6)
+        self.setHeaderLabels(["Application", "Source", "Size", "", "Last used", ""])
+        self.header().setStretchLastSection(False)
+        # the small gap between the columns may be narrower than the padding
+        # of the head
+        self.header().setMinimumSectionSize(4)
+        self.header().setSectionResizeMode(NAME_COLUMN, QHeaderView.ResizeMode.Stretch)
+        self.header().setSectionResizeMode(SOURCE_COLUMN, QHeaderView.ResizeMode.ResizeToContents)
+        self.header().setSectionResizeMode(SIZE_COLUMN, QHeaderView.ResizeMode.ResizeToContents)
+        # the empty column in the middle keeps the size and the day apart
+        self.header().setSectionResizeMode(GAP_COLUMN, QHeaderView.ResizeMode.Fixed)
+        self.header().resizeSection(GAP_COLUMN, COLUMN_GAP_WIDTH)
+        self.header().setSectionResizeMode(LAST_USED_COLUMN, QHeaderView.ResizeMode.ResizeToContents)
+        self.header().setSectionResizeMode(CHECK_COLUMN, QHeaderView.ResizeMode.Fixed)
+        self.header().resizeSection(CHECK_COLUMN, CHECK_COLUMN_WIDTH)
+        self.headerItem().setTextAlignment(
+            2, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
+        self.setItemDelegate(_RowDelegate(self))
+        self.setRootIsDecorated(False)
+        self.setIndentation(0)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setTextElideMode(Qt.TextElideMode.ElideMiddle)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
+        self.setVerticalScrollBar(_ThinScrollBar(Qt.Orientation.Vertical, self))
+        # the rows are sorted by hand: the order depends on the moment of the
+        # last use, not on the words of the column
+        self._sort_column = LAST_USED_COLUMN
+        self._sort_order = Qt.SortOrder.AscendingOrder
+        self.header().sectionClicked.connect(self._sort_by_column)
+        self.header().setSortIndicator(LAST_USED_COLUMN, Qt.SortOrder.AscendingOrder)
+        palette = self.palette()
+        palette.setColor(QPalette.ColorRole.Base, QColor(ROW_COLOR))
+        palette.setColor(QPalette.ColorRole.AlternateBase, QColor(ROW_COLOR))
+        # A transparent highlight keeps the row looking the same when it is clicked.
+        palette.setColor(QPalette.ColorRole.Highlight, QColor(0, 0, 0, 0))
+        palette.setColor(QPalette.ColorRole.HighlightedText, QColor("#000000"))
+        self.setPalette(palette)
+        self.setStyleSheet(TREE_STYLE)
+        self.viewport().installEventFilter(self)
+
+    def _sort_by_column(self, column: int) -> None:
+        """Put the rows in order when the head of a column is clicked."""
+        if column in (CHECK_COLUMN, GAP_COLUMN):
+            return
+        if column == self._sort_column:
+            # the second click turns the order around
+            self._sort_order = (
+                Qt.SortOrder.DescendingOrder
+                if self._sort_order == Qt.SortOrder.AscendingOrder
+                else Qt.SortOrder.AscendingOrder
+            )
+        else:
+            self._sort_column = column
+            self._sort_order = Qt.SortOrder.AscendingOrder
+        self.header().setSortIndicator(self._sort_column, self._sort_order)
+        self._apply_sort()
+
+    def _apply_sort(self) -> None:
+        """Put the rows in the order the user asked for."""
+        rows = []
+        for index in range(self.topLevelItemCount()):
+            item = self.topLevelItem(index)
+            app = item.data(0, Qt.ItemDataRole.UserRole)
+            if isinstance(app, Application):
+                rows.append((self._sort_key(app), app.name.lower(), item))
+        if not rows:
+            return
+        rows.sort(key=lambda row: row[:2], reverse=self._sort_order == Qt.SortOrder.DescendingOrder)
+        self.setUpdatesEnabled(False)
+        try:
+            for _, _, item in rows:
+                self.takeTopLevelItem(self.indexOfTopLevelItem(item))
+            for _, _, item in rows:
+                self.addTopLevelItem(item)
+            self._paint_rows()
+        finally:
+            self.setUpdatesEnabled(True)
+
+    def _sort_key(self, app: Application) -> tuple:
+        """What the rows are put in order by."""
+        column = self._sort_column
+        if column == SIZE_COLUMN:
+            return (app.size,)
+        if column == SOURCE_COLUMN:
+            return (app.source,)
+        if column == LAST_USED_COLUMN:
+            # the applications that were never used come first
+            return (app.last_used or 0.0,)
+        return (app.name.lower(),)
+
+    def eventFilter(self, obj, event) -> bool:
+        """Clicking the check box on the right selects the application."""
+        if obj is self.viewport() and event.type() == QEvent.Type.MouseButtonPress:
+            position = event.position().toPoint()
+            index = self.indexAt(position)
+            if index.isValid() and index.column() == CHECK_COLUMN:
+                item = self.itemFromIndex(index)
+                if item is not None:
+                    self._toggle(item)
+                    return True
+        return super().eventFilter(obj, event)
+
+    def _toggle(self, item: QTreeWidgetItem) -> None:
+        state = item.checkState(CHECK_COLUMN)
+        item.setCheckState(
+            CHECK_COLUMN,
+            Qt.CheckState.Unchecked if state == Qt.CheckState.Checked else Qt.CheckState.Checked,
+        )
+
+    def set_applications(self, apps: list[Application]) -> None:
+        """Show the applications that were found."""
+        # There can be thousands of them: the drawing waits until the last one
+        # is in place, otherwise every row would paint the whole list again.
+        self.setUpdatesEnabled(False)
+        self.blockSignals(True)
+        try:
+            self.clear()
+            for app in apps:
+                size = human_size(app.size) if app.size else "—"
+                item = QTreeWidgetItem(
+                    self,
+                    [app.name, app.source, size, "", describe_usage(app.last_used), ""],
+                )
+                item.setData(0, Qt.ItemDataRole.UserRole, app)
+                item.setCheckState(CHECK_COLUMN, Qt.CheckState.Unchecked)
+                item.setTextAlignment(2, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                item.setSizeHint(0, QSize(0, FILE_HEIGHT))
+                if app.summary:
+                    item.setToolTip(0, app.summary)
+                item.setToolTip(LAST_USED_COLUMN, _usage_tip(app))
+            self._paint_rows()
+        finally:
+            self.blockSignals(False)
+            self.setUpdatesEnabled(True)
+
+    def _paint_rows(self) -> None:
+        """Give the rows their stripes; they follow the place of the row."""
+        for index in range(self.topLevelItemCount()):
+            item = self.topLevelItem(index)
+            colour = QColor(STRIPE_COLOR if index % 2 else ROW_COLOR)
+            for column in range(self.columnCount()):
+                item.setBackground(column, colour)
+
+    @property
+    def count(self) -> int:
+        return self.topLevelItemCount()
+
+    @property
+    def never_used_count(self) -> int:
+        """How many of the applications were never used."""
+        total = 0
+        for index in range(self.topLevelItemCount()):
+            app = self.topLevelItem(index).data(0, Qt.ItemDataRole.UserRole)
+            if isinstance(app, Application) and app.last_used <= 0:
+                total += 1
+        return total
+
+    @property
+    def old_count(self) -> int:
+        """How many were used, but not for a long time."""
+        total = 0
+        for index in range(self.topLevelItemCount()):
+            app = self.topLevelItem(index).data(0, Qt.ItemDataRole.UserRole)
+            if isinstance(app, Application) and app.last_used > 0 and is_old(app.last_used):
+                total += 1
+        return total
+
+    def checked_applications(self) -> list[Application]:
+        """The applications the user wants to remove."""
+        apps = []
+        for index in range(self.topLevelItemCount()):
+            item = self.topLevelItem(index)
+            if item.checkState(CHECK_COLUMN) != Qt.CheckState.Checked:
+                continue
+            app = item.data(0, Qt.ItemDataRole.UserRole)
+            if app is not None:
+                apps.append(app)
+        return apps
+
+    def remove_applications(self, apps: list[Application]) -> None:
+        """Drop the rows of the applications that are gone."""
+        gone = set(apps)
+        for index in range(self.topLevelItemCount() - 1, -1, -1):
+            item = self.topLevelItem(index)
+            app = item.data(0, Qt.ItemDataRole.UserRole)
+            if app in gone:
+                self.takeTopLevelItem(index)
+
+
+class _ApplicationsScan:
+    """Looks for the installed applications; the worker only needs the two
+    methods of a task: the id and the run.
+    """
+
+    id = "applications"
+
+    def __init__(self) -> None:
+        self.dry_run = True
+
+    def run(self, report, is_cancelled):
+        report(-1, "Looking for applications…")
+        apps = discover_applications(is_cancelled)
+        if is_cancelled():
+            raise Cancelled
+        report(100, f"{len(apps)} applications found")
+        return apps
+
+
+class _ApplicationsRemoval:
+    """Uninstalls the applications the user ticked.
+
+    The ones of the system ask for the root password: a window of their own
+    shows up and waits for the user to type it.
+    """
+
+    id = "applications_removal"
+
+    def __init__(self, apps: list[Application]) -> None:
+        self.apps = apps
+        self.dry_run = False
+
+    def run(self, report, is_cancelled):
+        results = []
+        for index, app in enumerate(self.apps, 1):
+            if is_cancelled():
+                raise Cancelled
+            report(-1, f"Removing {app.name}…")
+            ok, message = remove_application(app)
+            results.append((app, ok, message))
+            report(index * 100 // len(self.apps), f"Removed {app.name}")
+        return results
+
+
+class _NewTaskDialog(QDialog):
+    """Asks how a new scheduled run looks: which task, and when."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("New task")
+        self.setModal(True)
+        self.setStyleSheet(
+            "QDialog { background-color: #F7EEE2; }"
+            "QLabel { font-size: 17px; color: black; background: transparent; }"
+        )
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(14)
+
+        self.task_combo = QComboBox()
+        for task_id, cls in TASKS.items():
+            self.task_combo.addItem(cls.name, task_id)
+
+        self.date_edit = QDateEdit()
+        self.date_edit.setCalendarPopup(True)
+        self.date_edit.setDisplayFormat("yyyy-MM-dd")
+        self.date_edit.setDate(QDate.currentDate())
+
+        self.every_spin = QSpinBox()
+        self.every_spin.setRange(1, 999)
+        self.every_spin.setValue(1)
+
+        self.unit_combo = QComboBox()
+        self.unit_combo.addItem("day(s)", "day")
+        self.unit_combo.addItem("month(s)", "month")
+
+        self.hour_edit = QTimeEdit()
+        self.hour_edit.setDisplayFormat("HH:mm")
+        self.hour_edit.setTime(QTime(3, 0))
+        self.hour_edit.setCalendarPopup(True)
+
+        frequency = QHBoxLayout()
+        frequency.setContentsMargins(0, 0, 0, 0)
+        frequency.setSpacing(8)
+        frequency.addWidget(self.every_spin)
+        frequency.addWidget(self.unit_combo)
+
+        form = QFormLayout()
+        form.setContentsMargins(0, 0, 0, 0)
+        form.setSpacing(10)
+        form.addRow("Task", self.task_combo)
+        form.addRow("Date", self.date_edit)
+        form.addRow("Repeat every", frequency)
+        form.addRow("Hour", self.hour_edit)
+        layout.addLayout(form)
+
+        hint = QLabel("The first run is on the chosen date at the chosen hour.")
+        hint.setStyleSheet("font-size: 14px; color: #6B6259; background: transparent;")
+        layout.addWidget(hint)
+
+        buttons = QHBoxLayout()
+        buttons.setSpacing(12)
+        buttons.addStretch()
+        cancel = QPushButton("Cancel")
+        cancel.setStyleSheet(PLAIN_BUTTON_STYLE)
+        cancel.clicked.connect(self.reject)
+        add = QPushButton("Add")
+        add.setStyleSheet(PRIMARY_BUTTON_STYLE)
+        add.setDefault(True)
+        add.clicked.connect(self.accept)
+        buttons.addWidget(cancel)
+        buttons.addWidget(add)
+        layout.addLayout(buttons)
+
+    def task_id(self) -> str:
+        return self.task_combo.currentData()
+
+    def start(self) -> datetime:
+        date = self.date_edit.date()
+        time = self.hour_edit.time()
+        return datetime(date.year(), date.month(), date.day(), time.hour(), time.minute())
+
+    def every(self) -> int:
+        return self.every_spin.value()
+
+    def unit(self) -> str:
+        return self.unit_combo.currentData()
+
+    def accept(self) -> None:
+        """Add the task only when the chosen schedule makes sense."""
+        error = CronScheduler.validate_interval(
+            self.start(), self.every(), self.unit(), self.task_id()
+        )
+        if error:
+            QMessageBox.warning(self, "Cannot add the task", error)
+            return
+        super().accept()
+
+
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
@@ -470,11 +904,16 @@ class MainWindow(QMainWindow):
         self.buttons: dict[str, QPushButton] = {}
         self.bars: dict[str, QProgressBar] = {}
         self.results = _ResultTree()
+        self.app_list = _ApplicationList()
         self._active_action: str | None = None  # "scan" / "cleanup" while a run is in flight
         self._starting = False  # True while _run_all_tasks is still queueing tasks
         self._found_bytes = 0  # size of the files the last run found
         self._found_files = 0  # number of those files
         self._found_categories = 0  # number of tasks that found something
+        self._apps_worker: Worker | None = None  # the worker that looks for the apps
+        self._apps_workers: list[Worker] = []  # they are kept alive until the app ends
+        self._apps_action: str | None = None  # "scan" / "remove" while a run is in flight
+        self._apps_scanned = False  # True when the applications were looked for
 
         central = QWidget()
         central.setStyleSheet("background-color: #F7EEE2; color: black;")
@@ -517,7 +956,7 @@ class MainWindow(QMainWindow):
         self.stack = QStackedWidget()
         self.stack.addWidget(self._build_overview_page())
         self.stack.addWidget(self._build_cleanup_page())
-        self.stack.addWidget(self._build_placeholder_page("Applications"))
+        self.stack.addWidget(self._build_applications_page())
         self.stack.addWidget(self._build_schedule_page())
         self.stack.addWidget(self._build_placeholder_page("History"))
         self.stack.addWidget(self._build_placeholder_page("Whitelist"))
@@ -782,27 +1221,66 @@ class MainWindow(QMainWindow):
         row.addStretch()
 
         self.scan_button = QPushButton("Scan")
-        self.scan_button.setStyleSheet(
-            "QPushButton { background-color: #F7EEE2; color: #4E4242;"
-            " border: 1px solid #4E4242; border-radius: 15px;"
-            " padding: 4px 22px; font-size: 18px; }"
-            "QPushButton:hover { background-color: #EDE2D1; }"
-            "QPushButton:disabled { color: #A79E92; border-color: #A79E92; }"
-        )
+        self.scan_button.setStyleSheet(PLAIN_BUTTON_STYLE)
         self.scan_button.clicked.connect(lambda: self._on_action_clicked("scan"))
 
         self.cleanup_button = QPushButton("Clean up")
-        self.cleanup_button.setStyleSheet(
-            "QPushButton { background-color: #4E4242; color: #F7EEE2;"
-            " border: 1px solid #4E4242; border-radius: 15px;"
-            " padding: 4px 22px; font-size: 18px; }"
-            "QPushButton:hover { background-color: #5C4E4E; }"
-            "QPushButton:disabled { background-color: #9C9393; border-color: #9C9393; }"
-        )
+        self.cleanup_button.setStyleSheet(PRIMARY_BUTTON_STYLE)
         self.cleanup_button.clicked.connect(lambda: self._on_action_clicked("cleanup"))
 
         row.addWidget(self.scan_button)
         row.addWidget(self.cleanup_button)
+        return row
+
+    def _build_applications_page(self) -> QWidget:
+        # "Applications" appears only in the top header, not as a page heading.
+        page, layout = _page_widget("Applications", with_heading=False)
+        layout.addLayout(self._build_applications_actions())
+        layout.addWidget(self._build_applications_box(), stretch=1)
+        return page
+
+    def _build_applications_box(self) -> QWidget:
+        container = QFrame()
+        container.setObjectName("applicationBox")
+        container.setStyleSheet(
+            "QFrame#applicationBox { background-color: #F7EEE2;"
+            " border: 1px solid #BDB6AA; border-radius: 15px; }"
+            "QLabel { background: transparent; border: none; }"
+        )
+
+        column = QVBoxLayout(container)
+        column.setContentsMargins(14, 2, 14, 14)
+        column.setSpacing(8)
+
+        self.app_list.itemChanged.connect(self._update_apps_info)
+        column.addWidget(self.app_list, stretch=1)
+        return container
+
+    def _build_applications_actions(self) -> QHBoxLayout:
+        row = QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 12)
+        row.setSpacing(12)
+
+        self.apps_info_label = QLabel("Nothing scanned yet")
+        self.apps_info_label.setAlignment(
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+        )
+        self.apps_info_label.setStyleSheet(
+            "font-size: 19px; color: black; background: transparent;"
+        )
+        row.addWidget(self.apps_info_label)
+        row.addStretch()
+
+        self.apps_scan_button = QPushButton("Scan")
+        self.apps_scan_button.setStyleSheet(PLAIN_BUTTON_STYLE)
+        self.apps_scan_button.clicked.connect(self._on_apps_scan_clicked)
+
+        self.apps_remove_button = QPushButton("Remove")
+        self.apps_remove_button.setStyleSheet(PRIMARY_BUTTON_STYLE)
+        self.apps_remove_button.clicked.connect(self._on_apps_remove_clicked)
+
+        row.addWidget(self.apps_scan_button)
+        row.addWidget(self.apps_remove_button)
         return row
 
     def log(self, message: str) -> None:
@@ -810,40 +1288,85 @@ class MainWindow(QMainWindow):
         print(f"[{stamp}] {message}")
 
     def _build_schedule_page(self) -> QWidget:
-        page, layout = _page_widget("Schedule")
-        layout.addWidget(self._build_schedule_box())
-        layout.addStretch()
+        # "Schedule" appears only in the top header, not as a page heading.
+        page, layout = _page_widget("Schedule", with_heading=False)
+        layout.addLayout(self._build_schedule_actions())
+        layout.addWidget(self._build_schedule_box(), stretch=1)
         return page
 
-    def _build_schedule_box(self) -> QGroupBox:
-        box = QGroupBox("Schedule (cron)")
-        layout = QVBoxLayout(box)
+    def _build_schedule_actions(self) -> QHBoxLayout:
+        row = QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 12)
+        row.setSpacing(12)
 
-        self.jobs_table = QTableWidget(0, 4)
-        self.jobs_table.setHorizontalHeaderLabels(["Enabled", "Cron", "Task", "Next run"])
-        self.jobs_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-        self.jobs_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        self.jobs_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        self.jobs_table.setMaximumHeight(160)
-        self.jobs_table.itemChanged.connect(self._on_job_item_changed)
-        layout.addWidget(self.jobs_table)
+        self.schedule_info_label = QLabel("0 tasks · 0 active · 0 inactive")
+        self.schedule_info_label.setAlignment(
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+        )
+        self.schedule_info_label.setStyleSheet(
+            "font-size: 19px; color: black; background: transparent;"
+        )
+        row.addWidget(self.schedule_info_label)
+        row.addStretch()
+
+        self.new_task_button = QPushButton("New Task")
+        self.new_task_button.setStyleSheet(PRIMARY_BUTTON_STYLE)
+        self.new_task_button.clicked.connect(self._new_task)
+        row.addWidget(self.new_task_button)
+        return row
+
+    def _build_schedule_box(self) -> QWidget:
+        container = QFrame()
+        container.setObjectName("scheduleBox")
+        container.setStyleSheet(
+            "QFrame#scheduleBox { background-color: #F7EEE2;"
+            " border: 1px solid #BDB6AA; border-radius: 15px; }"
+        )
+
+        column = QVBoxLayout(container)
+        column.setContentsMargins(14, 2, 14, 14)
+        column.setSpacing(8)
+
+        self.jobs_table = QTableWidget(0, 5)
+        self.jobs_table.setHorizontalHeaderLabels(["Enabled", "Schedule", "Task", "Next run", ""])
+        header = self.jobs_table.horizontalHeader()
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
+        header.setStretchLastSection(False)
+        self.jobs_table.setColumnWidth(0, 26)
+        self.jobs_table.setColumnWidth(2, 76)
+        self.jobs_table.setColumnWidth(3, 44)
+        self.jobs_table.setColumnWidth(4, 4)
+        self.jobs_table.resizeColumnToContents(1)
+        if self.jobs_table.columnWidth(1) < 450:
+            self.jobs_table.setColumnWidth(1, 450)
+        self.jobs_table.setColumnWidth(3, 44)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+        header.setStretchLastSection(False)
+
+        palette = self.jobs_table.palette()
+        palette.setColor(QPalette.ColorRole.Base, QColor(ROW_COLOR))
+        palette.setColor(QPalette.ColorRole.AlternateBase, QColor(ROW_COLOR))
+        palette.setColor(QPalette.ColorRole.Highlight, QColor(0, 0, 0, 0))
+        palette.setColor(QPalette.ColorRole.HighlightedText, QColor("#000000"))
+        self.jobs_table.setPalette(palette)
+        self.jobs_table.setStyleSheet(
+            f"QTableWidget {{ background: {ROW_COLOR}; border: none; outline: none; }}"
+            f"QTableWidget::item {{ background: {ROW_COLOR}; color: black; }}"
+            f"QTableWidget::item:selected {{ background: {ROW_COLOR}; color: black; }}"
+            f"QHeaderView::section {{ background: {ROW_COLOR}; color: #4E4242;"
+            " border: none; border-bottom: 1px solid #BDB6AA; padding: 4px 6px;"
+            " font-size: 14px; font-weight: 600; }"
+        )
+        column.addWidget(self.jobs_table, stretch=1)
 
         row = QHBoxLayout()
-        self.cron_edit = QLineEdit(placeholderText="e.g. 0 3 * * *  (daily at 03:00)")
-        self.task_combo = QComboBox()
-        for task_id, cls in TASKS.items():
-            self.task_combo.addItem(cls.name, task_id)
-        add = QPushButton("Add")
-        add.clicked.connect(self._add_job)
-        self.cron_edit.returnPressed.connect(self._add_job)
-        remove = QPushButton("Remove selected")
-        remove.clicked.connect(self._remove_job)
-        row.addWidget(self.cron_edit, stretch=1)
-        row.addWidget(self.task_combo)
-        row.addWidget(add)
-        row.addWidget(remove)
-        layout.addLayout(row)
-        return box
+        row.addStretch()
+        column.addLayout(row)
+        return container
 
     def make_task(self, task_id: str, dry_run: bool = False) -> PurgeTask:
         if task_id == ProjectBuildsTask.id:
@@ -890,6 +1413,141 @@ class MainWindow(QMainWindow):
         self._active_action = "cleanup"
         self._reset_found("Cleaning up…")
         self._run_all_tasks(dry_run=False, selection=selection)
+
+    def _on_apps_scan_clicked(self) -> None:
+        """The button shows 'Cancel' while it is the one running: cancel instead."""
+        if self._apps_action == "scan":
+            if self._apps_worker is not None:
+                self._apps_worker.cancel()
+            return
+        if self._apps_action is not None:
+            return
+        self._scan_applications()
+
+    def _scan_applications(self) -> None:
+        """Look for the installed applications, without freezing the window."""
+        self._apps_action = "scan"
+        self.apps_info_label.setText("Looking for applications…")
+        worker = Worker(_ApplicationsScan())
+        self._apps_worker = worker
+        self._apps_workers.append(worker)  # the pool does not delete them
+        worker.signals.finished.connect(self._on_apps_found)
+        worker.signals.failed.connect(self._on_apps_failed)
+        worker.signals.cancelled.connect(self._on_apps_cancelled)
+        worker.signals.progress.connect(self._on_apps_progress)
+        self.runner.pool.start(worker)
+        self._update_apps_buttons()
+
+    def _on_apps_found(self, _task_id: str, apps: list[Application]) -> None:
+        self._apps_action = None
+        self._apps_scanned = True
+        self._apps_worker = None
+        self.app_list.set_applications(apps)
+        self._update_apps_buttons()
+        self._update_apps_info()
+        self.log(f"applications: {len(apps)} found")
+
+    def _on_apps_failed(self, _task_id: str, error: str) -> None:
+        self._apps_action = None
+        self._apps_worker = None
+        self._update_apps_buttons()
+        self.apps_info_label.setText("Looking for the applications failed")
+        self.log(f"applications: FAILED\n{error}")
+
+    def _on_apps_cancelled(self, _task_id: str) -> None:
+        self._apps_action = None
+        self._apps_worker = None
+        self._update_apps_buttons()
+        self.apps_info_label.setText("Looking for the applications was cancelled")
+        self.log("applications: cancelled")
+
+    def _on_apps_progress(self, _task_id: str, _percent: int, message: str) -> None:
+        """Say what the running worker is doing."""
+        if message:
+            self.apps_info_label.setText(message)
+
+    def _update_apps_buttons(self) -> None:
+        # The button that started the run turns into "Cancel"; the other one stays disabled.
+        self.apps_scan_button.setText("Cancel" if self._apps_action == "scan" else "Scan")
+        self.apps_remove_button.setText("Cancel" if self._apps_action == "remove" else "Remove")
+        running = self._apps_action is not None
+        self.apps_scan_button.setEnabled(not running or self._apps_action == "scan")
+        self.apps_remove_button.setEnabled(not running or self._apps_action == "remove")
+
+    def _update_apps_info(self, *_) -> None:
+        """Show how many applications were found and how many are ticked."""
+        if not self._apps_scanned:
+            self.apps_info_label.setText("Nothing scanned yet")
+            return
+        found = self.app_list.count
+        checked = len(self.app_list.checked_applications())
+        text = f"Found {found} application" if found == 1 else f"Found {found} applications"
+        unused = self.app_list.never_used_count
+        if unused:
+            text += f" · {unused} never used"
+        old = self.app_list.old_count
+        if old:
+            text += f" · {old} not used for months"
+        if checked:
+            text += f" · {checked} selected"
+        self.apps_info_label.setText(text)
+
+    def _on_apps_remove_clicked(self) -> None:
+        """Remove the ticked applications, after asking for confirmation."""
+        if self._apps_action == "remove":
+            if self._apps_worker is not None:
+                self._apps_worker.cancel()
+            return
+        if self._apps_action is not None:
+            return
+        apps = self.app_list.checked_applications()
+        if not apps:
+            QMessageBox.information(
+                self,
+                "Nothing selected",
+                "No applications are selected. Tick the applications you want to remove first.",
+            )
+            return
+        answer = QMessageBox.warning(
+            self,
+            "Remove applications?",
+            f"Removing will permanently uninstall {len(apps)} selected applications. Continue?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self._remove_applications(apps)
+
+    def _remove_applications(self, apps: list[Application]) -> None:
+        """Uninstall the applications; the ones of the system ask for the password."""
+        self._apps_action = "remove"
+        self.apps_info_label.setText(f"Removing {len(apps)} applications…")
+        worker = Worker(_ApplicationsRemoval(apps))
+        self._apps_worker = worker
+        self._apps_workers.append(worker)
+        worker.signals.finished.connect(self._on_apps_removed)
+        worker.signals.failed.connect(self._on_apps_failed)
+        worker.signals.cancelled.connect(self._on_apps_cancelled)
+        worker.signals.progress.connect(self._on_apps_progress)
+        self.runner.pool.start(worker)
+        self._update_apps_buttons()
+
+    def _on_apps_removed(self, _task_id: str, results: list) -> None:
+        self._apps_action = None
+        self._apps_worker = None
+        self._update_apps_buttons()
+        removed = [app for app, ok, _ in results if ok]
+        failed = [(app, message) for app, ok, message in results if not ok]
+        if removed:
+            self.app_list.remove_applications(removed)
+        text = f"Removed {len(removed)} application" + ("s" if len(removed) != 1 else "")
+        if failed:
+            text += f" · {len(failed)} failed"
+        self.apps_info_label.setText(text)
+        for app, ok, message in results:
+            self.log(f"remove {app.source}: {app.package} → {'done' if ok else 'failed'}")
+            if message and not ok:
+                self.log(f"    {message}")
 
     def _reset_found(self, status: str) -> None:
         self._found_bytes = 0
@@ -1008,43 +1666,68 @@ class MainWindow(QMainWindow):
 
     # --- schedule -----------------------------------------------------------
 
-    def _add_job(self) -> None:
-        cron = self.cron_edit.text().strip()
-        task_id = self.task_combo.currentData()
-        if error := CronScheduler.validate(cron, task_id):
-            QMessageBox.warning(self, "Invalid job", error)
+    def _new_task(self) -> None:
+        """Ask how the new task looks and add it to the schedule."""
+        dialog = _NewTaskDialog(self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
             return
-        self.scheduler.add_job(cron, task_id)
-        self.cron_edit.clear()
-        self.log(f"scheduled {task_id} at '{cron}'")
+        job = self.scheduler.add_interval_job(
+            dialog.start(), dialog.every(), dialog.unit(), dialog.task_id()
+        )
+        self.log(f"scheduled {job.task_id}: {job.describe()}")
 
-    def _remove_job(self) -> None:
-        rows = sorted({i.row() for i in self.jobs_table.selectedIndexes()}, reverse=True)
-        for row in rows:
+    def _set_job_enabled(self, row: int, enabled: bool) -> None:
+        if 0 <= row < len(self.scheduler.jobs):
+            self.scheduler.set_enabled(row, enabled)
+
+    def _remove_job_row(self, row: int) -> None:
+        if 0 <= row < len(self.scheduler.jobs):
             self.scheduler.remove_job(row)
-
-    def _on_job_item_changed(self, item: QTableWidgetItem) -> None:
-        if item.column() == 0:
-            self.scheduler.set_enabled(item.row(), item.checkState() == Qt.CheckState.Checked)
 
     def _on_job_fired(self, job: Job, started: bool) -> None:
         note = "" if started else " (skipped, already running)"
-        self.log(f"cron '{job.cron}' fired {job.task_id}{note}")
+        self.log(f"schedule '{job.describe()}' fired {job.task_id}{note}")
 
     def _refresh_jobs(self) -> None:
         table = self.jobs_table
-        table.blockSignals(True)
         table.setRowCount(len(self.scheduler.jobs))
         for row, job in enumerate(self.scheduler.jobs):
-            enabled = QTableWidgetItem()
-            enabled.setFlags(enabled.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-            enabled.setCheckState(Qt.CheckState.Checked if job.enabled else Qt.CheckState.Unchecked)
-            nxt = self.scheduler.next_run(job)
-            table.setItem(row, 0, enabled)
-            table.setItem(row, 1, QTableWidgetItem(job.cron))
+            toggle = _Switch(job.enabled)
+            toggle.setToolTip("Enabled" if job.enabled else "Disabled")
+            toggle.toggled.connect(lambda checked, r=row: self._set_job_enabled(r, checked))
+            toggle_cell = QWidget()
+            toggle_cell.setStyleSheet("background: transparent;")
+            tc_layout = QHBoxLayout(toggle_cell)
+            tc_layout.setContentsMargins(0, 0, 0, 0)
+            tc_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            tc_layout.addWidget(toggle)
+            table.setCellWidget(row, 0, toggle_cell)
+
+            table.setItem(row, 1, QTableWidgetItem(job.describe()))
             table.setItem(row, 2, QTableWidgetItem(TASKS[job.task_id].name))
+            nxt = self.scheduler.next_run(job)
             table.setItem(row, 3, QTableWidgetItem(nxt.strftime("%Y-%m-%d %H:%M") if nxt else "—"))
-        table.blockSignals(False)
+
+            remove = QPushButton("×")
+            remove.setFixedSize(22, 22)
+            remove.setStyleSheet(
+                "QPushButton { background-color: transparent; color: #4E4242; border: none; font-size: 16px; }"
+                "QPushButton:hover { color: #7C6565; }"
+            )
+            remove.clicked.connect(lambda _=False, r=row: self._remove_job_row(r))
+            remove_cell = QWidget()
+            remove_cell.setStyleSheet("background: transparent;")
+            rc_layout = QHBoxLayout(remove_cell)
+            rc_layout.setContentsMargins(0, 0, 0, 0)
+            rc_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            rc_layout.addWidget(remove)
+            table.setCellWidget(row, 4, remove_cell)
+        total = len(self.scheduler.jobs)
+        active = sum(1 for job in self.scheduler.jobs if job.enabled)
+        tasks = "task" if total == 1 else "tasks"
+        self.schedule_info_label.setText(
+            f"{total} {tasks} · {active} active · {total - active} inactive"
+        )
 
     def closeEvent(self, event: QCloseEvent) -> None:
         self.runner.shutdown()
