@@ -54,6 +54,9 @@ FLATPAK_ROOTS: tuple[Path, ...] = (
 # Where snap keeps its apps
 SNAP_ROOT = Path("/snap")
 
+# Where snap keeps the icons of its apps, inside every snap
+SNAP_ICON_NAMES: tuple[str, ...] = ("icon.svg", "icon.png")
+
 # The databases of the package managers, used when their tool is missing
 DPKG_STATUS = Path("/var/lib/dpkg/status")
 PACMAN_LOCAL = Path("/var/lib/pacman/local")
@@ -84,6 +87,7 @@ class Application:
     last_used: float = 0.0  # when it was used for the last time, 0 when never
     used_from: str = ""  # where that moment comes from
     program: str = ""  # the program it starts, for the trace of the usage
+    icon: str = ""  # a name of the icon theme or the path of an image
 
 
 def discover_applications(is_cancelled: CancelCheck | None = None) -> list[Application]:
@@ -427,6 +431,7 @@ def _read_desktop_entry(entry: Path, directory: Path) -> Application | None:
         needs_root=not _in_home(directory),
         path=entry,
         program=program,
+        icon=data.get("Icon", "").strip(),
     )
 
 
@@ -484,6 +489,7 @@ def _flatpak_cli_apps(is_cancelled: CancelCheck) -> list[Application]:
                 package=package,
                 size=size,
                 needs_root=package not in user_apps,
+                icon=package,  # flatpak exports the icon under the id of the app
             )
         )
     return apps
@@ -505,6 +511,7 @@ def _flatpak_metadata_apps(is_cancelled: CancelCheck) -> list[Application]:
                     source="flatpak",
                     package=app_id,
                     needs_root=needs_root,
+                    icon=app_id,
                 )
             )
     return apps
@@ -552,6 +559,7 @@ def _snap_cli_apps(is_cancelled: CancelCheck) -> list[Application]:
                 summary=version,
                 size=_path_size(f"{SNAP_ROOT}/{name}"),
                 needs_root=needs_root,
+                icon=_snap_icon(name),
             )
         )
     return apps
@@ -574,9 +582,19 @@ def _snap_metadata_apps(is_cancelled: CancelCheck) -> list[Application]:
                 summary=version,
                 size=_path_size(f"{SNAP_ROOT}/{entry}"),
                 needs_root=True,
+                icon=_snap_icon(entry),
             )
         )
     return apps
+
+
+def _snap_icon(name: str) -> str:
+    """The path of the icon a snap carries, empty when it has none."""
+    gui = SNAP_ROOT / name / "current" / "meta" / "gui"
+    for icon in SNAP_ICON_NAMES:
+        if (gui / icon).is_file():
+            return str(gui / icon)
+    return ""
 
 
 def _read_snap_yaml(path: Path) -> tuple[str, str]:
