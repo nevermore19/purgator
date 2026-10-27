@@ -26,6 +26,9 @@ NO_CANCEL: CancelCheck = lambda: False
 
 COMMAND_TIMEOUT = 30
 
+# An atime this close to the last change of the file was set by its installer
+INSTALL_SLACK = 2
+
 
 def host_prefix() -> list[str]:
     """The words that send a command to the host instead of the sandbox."""
@@ -118,10 +121,14 @@ def access_times(paths: list[str]) -> dict[str, float]:
     for start in range(0, len(paths), 400):
         chunk = paths[start : start + 400]
         names = " ".join(shlex.quote(p) for p in chunk)
-        command = f"stat -c '%X %n' -- {names} || true"
+        # -L: the atime of a symlink changes every time the path is resolved
+        command = f"stat -L -c '%X %Z %n' -- {names} || true"
         output = host_run(["sh", "-c", command], NO_CANCEL) or ""
         for line in output.splitlines():
-            stamp, _, name = line.partition(" ")
-            if stamp.isdigit():
-                times[name] = int(stamp)
+            read, changed, name = (line.split(" ", 2) + ["", ""])[:3]
+            if not (read.isdigit() and changed.isdigit()):
+                continue
+            # the package manager sets the atime when it writes the file
+            if int(read) > int(changed) + INSTALL_SLACK:
+                times[name] = int(read)
     return times
