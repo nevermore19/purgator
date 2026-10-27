@@ -85,6 +85,14 @@ FOLDER_ICON_PATH = ICONS_DIR / "folder.svg"
 FILE_ICON_PATH = ICONS_DIR / "file.svg"
 KIND_ICON_SIZE = 16
 
+# Icon of an application whose own icon cannot be found
+APPLICATION_ICON_PATH = ICONS_DIR / "application.svg"
+APP_ICON_SIZE = 20
+
+# The old place of the application icons, outside the icon theme
+PIXMAPS_DIR = Path("/usr/share/pixmaps")
+PIXMAP_SUFFIXES = (".svg", ".png", ".xpm")
+
 # Width of the column with the check boxes
 CHECK_COLUMN_WIDTH = 34
 
@@ -161,6 +169,23 @@ def _display_path(path: Path) -> str:
     if str(relative) == ".":
         return "~"
     return f"~/{relative}"
+
+
+def _find_icon(name: str) -> QIcon | None:
+    """Look an icon up by its path, in the icon theme or among the pixmaps."""
+    if not name:
+        return None
+    if name.startswith("/"):
+        return QIcon(name) if Path(name).is_file() else None
+    stem = name.removesuffix(Path(name).suffix) if name.endswith(PIXMAP_SUFFIXES) else name
+    icon = QIcon.fromTheme(stem)
+    if not icon.isNull():
+        return icon
+    for suffix in PIXMAP_SUFFIXES:
+        path = PIXMAPS_DIR / f"{stem}{suffix}"
+        if path.is_file():
+            return QIcon(str(path))
+    return None
 
 
 def _usage_tip(app: Application) -> str:
@@ -611,6 +636,9 @@ class _ApplicationList(QTreeWidget):
         self.setTextElideMode(Qt.TextElideMode.ElideMiddle)
         self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
         self.setVerticalScrollBar(_ThinScrollBar(Qt.Orientation.Vertical, self))
+        self.setIconSize(QSize(APP_ICON_SIZE, APP_ICON_SIZE))
+        self._fallback_icon = QIcon(str(APPLICATION_ICON_PATH))
+        self._icons: dict[str, QIcon] = {}  # one lookup per icon name
         # the rows are sorted by hand: the order depends on the moment of the
         # last use, not on the words of the column
         self._sort_column = LAST_USED_COLUMN
@@ -711,6 +739,7 @@ class _ApplicationList(QTreeWidget):
                     [app.name, app.source, size, "", describe_usage(app.last_used), ""],
                 )
                 item.setData(0, Qt.ItemDataRole.UserRole, app)
+                item.setIcon(NAME_COLUMN, self._icon_of(app))
                 item.setCheckState(CHECK_COLUMN, Qt.CheckState.Unchecked)
                 item.setTextAlignment(2, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
                 item.setSizeHint(0, QSize(0, FILE_HEIGHT))
@@ -721,6 +750,12 @@ class _ApplicationList(QTreeWidget):
         finally:
             self.blockSignals(False)
             self.setUpdatesEnabled(True)
+
+    def _icon_of(self, app: Application) -> QIcon:
+        """The icon of an application, or the generic one when it has none."""
+        if app.icon not in self._icons:
+            self._icons[app.icon] = _find_icon(app.icon) or self._fallback_icon
+        return self._icons[app.icon]
 
     def _paint_rows(self) -> None:
         """Give the rows their stripes; they follow the place of the row."""
