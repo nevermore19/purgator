@@ -10,6 +10,7 @@ from PySide6.QtGui import (
     QBrush,
     QCloseEvent,
     QColor,
+    QIcon,
     QPainter,
     QPainterPath,
     QPalette,
@@ -78,8 +79,11 @@ ROW_COLOR = "#F7EEE2"
 CATEGORY_HEIGHT = 36
 FILE_HEIGHT = 28
 
-# Gap between the D/F marker and the path in front of it
-KIND_GAP = "   "
+# Icons in front of a scanned path: a directory or a single file
+ICONS_DIR = Path(__file__).resolve().parent.parent.parent.parent / "assets" / "icons"
+FOLDER_ICON_PATH = ICONS_DIR / "folder.svg"
+FILE_ICON_PATH = ICONS_DIR / "file.svg"
+KIND_ICON_SIZE = 16
 
 # Width of the column with the check boxes
 CHECK_COLUMN_WIDTH = 34
@@ -416,6 +420,9 @@ class _ResultTree(QTreeWidget):
         palette.setColor(QPalette.ColorRole.HighlightedText, QColor("#000000"))
         self.setPalette(palette)
         self.setStyleSheet(TREE_STYLE)
+        self.setIconSize(QSize(KIND_ICON_SIZE, KIND_ICON_SIZE))
+        self._folder_icon = QIcon(str(FOLDER_ICON_PATH))
+        self._file_icon = QIcon(str(FILE_ICON_PATH))
         self.itemExpanded.connect(self._on_expanded)
         self.itemCollapsed.connect(self._on_collapsed)
         self.viewport().installEventFilter(self)
@@ -551,9 +558,10 @@ class _ResultTree(QTreeWidget):
         self._entries[result.task_id] = list(result.paths)
         self._checked[result.task_id] = set(result.paths)
         for path in result.paths:
-            kind = "D" if path in result.directories else "F"
+            icon = self._folder_icon if path in result.directories else self._file_icon
             size = human_size(result.sizes.get(path, 0))
-            child = QTreeWidgetItem(item, [f"{kind}{KIND_GAP}{_display_path(path)}", size, ""])
+            child = QTreeWidgetItem(item, [_display_path(path), size, ""])
+            child.setIcon(0, icon)
             child.setData(2, Qt.ItemDataRole.UserRole, path)
             child.setCheckState(2, Qt.CheckState.Checked)
             child.setTextAlignment(1, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
