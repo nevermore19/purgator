@@ -3,6 +3,7 @@
 # IDEs
 .idea
 .vscode
+.zed
 
 # Python
 __pycache__/
