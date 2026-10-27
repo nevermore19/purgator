@@ -4,7 +4,7 @@ import shutil
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import QDate, QEvent, QPointF, QRectF, QSettings, QSize, Qt, QTime, Signal
+from PySide6.QtCore import QDate, QDateTime, QEvent, QPointF, QRectF, QSettings, QSize, Qt, QTime, Signal
 from PySide6.QtGui import (
     QBrush,
     QCloseEvent,
@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
     QAbstractItemView,
     QComboBox,
     QDateEdit,
+    QDateTimeEdit,
     QDialog,
     QFileDialog,
     QFormLayout,
@@ -40,9 +41,9 @@ from PySide6.QtWidgets import (
     QStyledItemDelegate,
     QTableWidget,
     QTableWidgetItem,
+    QTimeEdit,
     QTreeWidget,
     QTreeWidgetItem,
-    QTimeEdit,
     QVBoxLayout,
     QWidget,
 )
@@ -346,17 +347,28 @@ class _ThinScrollBar(QScrollBar):
 
     def __init__(self, orientation: Qt.Orientation, parent: QWidget | None = None) -> None:
         super().__init__(orientation, parent)
-        self.setFixedWidth(SCROLLBAR_WIDTH)
-        self.setStyleSheet(
-            f"QScrollBar {{ background: transparent; width: {SCROLLBAR_WIDTH}px; }}"
-            f"QScrollBar::handle:vertical {{ background: {SCROLLBAR_COLOR};"
-            " border-radius: 3px; min-height: 30px; }"
-            "QScrollBar::handle:vertical:hover { background: #6E605E; }"
-            "QScrollBar::handle:horizontal { background: transparent; }"
-            "QScrollBar::add-line, QScrollBar::sub-line,"
-            " QScrollBar::add-page, QScrollBar::sub-page { background: transparent;"
-            " border: none; height: 0; width: 0; }"
-        )
+        if orientation == Qt.Orientation.Vertical:
+            self.setFixedWidth(SCROLLBAR_WIDTH)
+            self.setStyleSheet(
+                f"QScrollBar:vertical {{ background: transparent; width: {SCROLLBAR_WIDTH}px; }}"
+                f"QScrollBar::handle:vertical {{ background: {SCROLLBAR_COLOR};"
+                " border-radius: 3px; min-height: 30px; }"
+                "QScrollBar::handle:vertical:hover { background: #6E605E; }"
+                "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical,"
+                " QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: transparent;"
+                " border: none; height: 0; width: 0; }"
+            )
+        else:
+            self.setFixedHeight(SCROLLBAR_WIDTH)
+            self.setStyleSheet(
+                f"QScrollBar:horizontal {{ background: transparent; height: {SCROLLBAR_WIDTH}px; }}"
+                f"QScrollBar::handle:horizontal {{ background: {SCROLLBAR_COLOR};"
+                " border-radius: 3px; min-width: 30px; }"
+                "QScrollBar::handle:horizontal:hover { background: #6E605E; }"
+                "QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal,"
+                " QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal { background: transparent;"
+                " border: none; height: 0; width: 0; }"
+            )
 
 
 class _ResultTree(QTreeWidget):
@@ -803,14 +815,21 @@ class _NewTaskDialog(QDialog):
         self.setWindowTitle("New task")
         self.setModal(True)
         self.setStyleSheet(
-            "QDialog { background-color: #F7EEE2; }"
-            "QLabel { font-size: 17px; color: black; background: transparent; }"
-            "QComboBox { background-color: #F7EEE2; color: black; border: none; }"
+            "QDialog { background-color: #F7EEE2; color: #000000; }"
+            "QLabel { font-size: 17px; color: #000000; background: transparent; }"
+            "QComboBox { background-color: #F7EEE2; color: #000000; border: 1px solid #BDB6AA; border-radius: 4px; padding: 2px 6px; }"
             "QComboBox::drop-down { border: none; background: transparent; width: 24px; }"
-            "QDateEdit, QTimeEdit, QSpinBox { background-color: #F7EEE2; color: black; border: none; }"
+            "QComboBox QAbstractItemView { background-color: #F7EEE2; selection-background-color: #4E4242; selection-color: #FFFFFF; color: #000000; }"
+            "QComboBox QAbstractItemView::item { color: #000000; }"
+            "QComboBox QAbstractItemView::item:hover { background-color: #BDB6AA; color: #000000; }"
+            "QDateEdit, QTimeEdit, QSpinBox { background-color: #F7EEE2; color: #000000; border: 1px solid #BDB6AA; border-radius: 4px; padding: 2px 6px; }"
+            "QDateEdit QLineEdit, QTimeEdit QLineEdit, QSpinBox QLineEdit { background-color: #F7EEE2; color: #000000; border: none; padding: 0px; selection-background-color: #4E4242; selection-color: #FFFFFF; }"
+            "QComboBox QLineEdit { background-color: #F7EEE2; color: #000000; border: none; }"
             "QDateEdit::calendar-button, QTimeEdit::calendar-button"
-            " { border: none; background: transparent; }"
+            " { border: none; background: transparent; border-top-right-radius: 3px; border-bottom-right-radius: 3px; }"
+            "QDateEdit::calendar-button:hover, QTimeEdit::calendar-button:hover { background-color: #EDE2D1; }"
             "QSpinBox::up-button, QSpinBox::down-button { border: none; background: transparent; }"
+            "QSpinBox::up-button:hover, QSpinBox::down-button:hover { background-color: #EDE2D1; }"
         )
 
         layout = QVBoxLayout(self)
@@ -825,10 +844,22 @@ class _NewTaskDialog(QDialog):
         self.date_edit.setCalendarPopup(True)
         self.date_edit.setDisplayFormat("yyyy-MM-dd")
         self.date_edit.setDate(QDate.currentDate())
+        if self.date_edit.lineEdit():
+            le = self.date_edit.lineEdit()
+            le.setReadOnly(False)
+            le.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+            le.setStyleSheet("QLineEdit { background-color: #F7EEE2; color: #000000; border: none; }")
+            le.setPalette(le.palette())
 
         self.every_spin = QSpinBox()
         self.every_spin.setRange(1, 999)
         self.every_spin.setValue(1)
+        if self.every_spin.lineEdit():
+            le = self.every_spin.lineEdit()
+            le.setReadOnly(False)
+            le.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+            le.setStyleSheet("QLineEdit { background-color: #F7EEE2; color: #000000; border: none; }")
+            le.setPalette(le.palette())
 
         self.unit_combo = QComboBox()
         self.unit_combo.addItem("day(s)", "day")
@@ -838,6 +869,12 @@ class _NewTaskDialog(QDialog):
         self.hour_edit.setDisplayFormat("HH:mm")
         self.hour_edit.setTime(QTime(3, 0))
         self.hour_edit.setCalendarPopup(True)
+        if self.hour_edit.lineEdit():
+            le = self.hour_edit.lineEdit()
+            le.setReadOnly(False)
+            le.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+            le.setStyleSheet("QLineEdit { background-color: #F7EEE2; color: #000000; border: none; }")
+            le.setPalette(le.palette())
 
         # The selected text is drawn in white on the deep accent colour of the
         # app; the focused dropdown shows the selected option the same way.
@@ -848,12 +885,32 @@ class _NewTaskDialog(QDialog):
             self.every_spin,
             self.unit_combo,
         ):
-            palette = input_widget.palette()
-            palette.setColor(QPalette.ColorRole.Base, QColor(ROW_COLOR))
-            palette.setColor(QPalette.ColorRole.Text, QColor("#000000"))
-            palette.setColor(QPalette.ColorRole.Highlight, QColor("#4E4242"))
-            palette.setColor(QPalette.ColorRole.HighlightedText, QColor("#FFFFFF"))
-            input_widget.setPalette(palette)
+            try:
+                input_widget.setAutoFillBackground(True)
+                palette = input_widget.palette()
+                palette.setColor(QPalette.ColorRole.Base, QColor("#F7EEE2"))
+                palette.setColor(QPalette.ColorRole.Window, QColor("#F7EEE2"))
+                palette.setColor(QPalette.ColorRole.Text, QColor("#000000"))
+                palette.setColor(QPalette.ColorRole.WindowText, QColor("#000000"))
+                palette.setColor(QPalette.ColorRole.ButtonText, QColor("#000000"))
+                palette.setColor(QPalette.ColorRole.Highlight, QColor("#4E4242"))
+                palette.setColor(QPalette.ColorRole.HighlightedText, QColor("#FFFFFF"))
+                input_widget.setPalette(palette)
+                if hasattr(input_widget, 'lineEdit') and input_widget.lineEdit() is not None:
+                    le = input_widget.lineEdit()
+                    le.setAutoFillBackground(True)
+                    le.setStyleSheet("QLineEdit { background-color: #F7EEE2; color: #000000; border: none; }")
+                    le_palette = le.palette()
+                    le_palette.setColor(QPalette.ColorRole.Base, QColor("#F7EEE2"))
+                    le_palette.setColor(QPalette.ColorRole.Window, QColor("#F7EEE2"))
+                    le_palette.setColor(QPalette.ColorRole.Text, QColor("#000000"))
+                    le_palette.setColor(QPalette.ColorRole.WindowText, QColor("#000000"))
+                    le_palette.setColor(QPalette.ColorRole.ButtonText, QColor("#000000"))
+                    le_palette.setColor(QPalette.ColorRole.Highlight, QColor("#4E4242"))
+                    le_palette.setColor(QPalette.ColorRole.HighlightedText, QColor("#FFFFFF"))
+                    le.setPalette(le_palette)
+            except Exception:
+                pass
 
         for combo in (self.task_combo, self.unit_combo):
             if view := combo.view():
@@ -864,19 +921,30 @@ class _NewTaskDialog(QDialog):
                 view_palette.setColor(QPalette.ColorRole.HighlightedText, QColor("#FFFFFF"))
                 view.setPalette(view_palette)
 
-        frequency = QHBoxLayout()
-        frequency.setContentsMargins(0, 0, 0, 0)
-        frequency.setSpacing(8)
-        frequency.addWidget(self.every_spin)
-        frequency.addWidget(self.unit_combo)
+        self.every_spin.setFixedWidth(70)
+        self.hour_edit.setFixedWidth(100)
+        self.unit_combo.setMinimumWidth(110)
 
         form = QFormLayout()
         form.setContentsMargins(0, 0, 0, 0)
         form.setSpacing(10)
         form.addRow("Task", self.task_combo)
         form.addRow("Date", self.date_edit)
-        form.addRow("Repeat every", frequency)
-        form.addRow("Hour", self.hour_edit)
+        freq_wrap = QWidget()
+        fw = QHBoxLayout(freq_wrap)
+        fw.setContentsMargins(0, 0, 0, 0)
+        fw.setSpacing(8)
+        fw.addWidget(self.every_spin)
+        fw.addWidget(self.unit_combo)
+        fw.addStretch()
+        form.addRow("Repeat every", freq_wrap)
+        hour_wrap = QWidget()
+        hw = QHBoxLayout(hour_wrap)
+        hw.setContentsMargins(0, 0, 0, 0)
+        hw.setSpacing(0)
+        hw.addWidget(self.hour_edit)
+        hw.addStretch()
+        form.addRow("Hour", hour_wrap)
         layout.addLayout(form)
 
         hint = QLabel("The first run is on the chosen date at the chosen hour.")
@@ -984,12 +1052,54 @@ class MainWindow(QMainWindow):
         content.setContentsMargins(0, 0, 0, 0)
         content.addWidget(self._build_nav())
 
+        self.history_log = QListWidget()
+        self.history_log.setVerticalScrollBar(_ThinScrollBar(Qt.Orientation.Vertical, self.history_log))
+        self.history_log.setHorizontalScrollBar(_ThinScrollBar(Qt.Orientation.Horizontal, self.history_log))
+        self.history_log.setStyleSheet(
+            "QListWidget { background-color: #F7EEE2; border: none; outline: none; font-size: 13px; }"
+            "QListWidget::item { padding: 4px 6px; }"
+            "QListWidget::item:selected { background: transparent; color: black; }"
+        )
+        self.history_list = QTableWidget(0, 4)
+        self.history_list.setHorizontalHeaderLabels(["Task", "Action", "When", "Status"])
+        h = self.history_list.horizontalHeader()
+        h.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        h.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        h.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        h.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
+        h.setStretchLastSection(True)
+        self.history_list.setColumnWidth(0, 220)
+        self.history_list.setColumnWidth(1, 220)
+        self.history_list.setColumnWidth(2, 200)
+        self.history_list.setVerticalScrollBar(_ThinScrollBar(Qt.Orientation.Vertical, self.history_list))
+        self.history_list.setHorizontalScrollBar(_ThinScrollBar(Qt.Orientation.Horizontal, self.history_list))
+        palette_h = self.history_list.palette()
+        palette_h.setColor(QPalette.ColorRole.Base, QColor(ROW_COLOR))
+        palette_h.setColor(QPalette.ColorRole.AlternateBase, QColor(STRIPE_COLOR))
+        palette_h.setColor(QPalette.ColorRole.Highlight, QColor(0, 0, 0, 0))
+        palette_h.setColor(QPalette.ColorRole.HighlightedText, QColor("#000000"))
+        self.history_list.setPalette(palette_h)
+        self.history_list.setAlternatingRowColors(False)
+        self.history_list.setStyleSheet(
+            f"QTableWidget {{ background: {ROW_COLOR}; border: none; outline: none; gridline-color: transparent; }}"
+            f"QTableWidget::item {{ color: black; padding: 4px 16px; }}"
+            f"QTableWidget::item:selected {{ background: transparent; color: black; }}"
+            f"QHeaderView {{ background: {ROW_COLOR}; border: none; }}"
+            f"QHeaderView::section {{ background: {ROW_COLOR}; color: #4E4242;"
+            " border: none; border-bottom: 1px solid #BDB6AA; padding: 6px 16px;"
+            " font-size: 14px; font-weight: 600; }"
+            "QTableCornerButton::section { background: transparent; border: none; }"
+        )
+        self.history_list.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.history_list.setSelectionMode(QTableWidget.SelectionMode.NoSelection)
+        self.history_list.setShowGrid(False)
+        self.history_list.verticalHeader().setVisible(False)
         self.stack = QStackedWidget()
         self.stack.addWidget(self._build_overview_page())
         self.stack.addWidget(self._build_cleanup_page())
         self.stack.addWidget(self._build_applications_page())
         self.stack.addWidget(self._build_schedule_page())
-        self.stack.addWidget(self._build_placeholder_page("History"))
+        self.stack.addWidget(self._build_history_page())
         self.stack.addWidget(self._build_placeholder_page("Whitelist"))
         self.stack.addWidget(self._build_placeholder_page("Settings"))
         content.addWidget(self.stack, stretch=1)
@@ -1205,6 +1315,40 @@ class MainWindow(QMainWindow):
 
         return container
 
+    def _build_history_page(self) -> QWidget:
+        page, layout = _page_widget("History", with_heading=False)
+        top = QFrame()
+        top.setObjectName("historyTopBox")
+        top.setStyleSheet(
+            "QFrame#historyTopBox { background-color: #F7EEE2;"
+            " border: 1px solid #BDB6AA; border-radius: 15px; }"
+            "QLabel { background: transparent; border: none; }"
+        )
+        top_layout = QVBoxLayout(top)
+        top_layout.setContentsMargins(14, 6, 14, 14)
+        top_layout.setSpacing(6)
+        label_top = QLabel("History")
+        label_top.setStyleSheet("font-size: 16px; font-weight: 600; color: black;")
+        top_layout.addWidget(label_top)
+        top_layout.addWidget(self.history_list)
+        bottom = QFrame()
+        bottom.setObjectName("historyLogBox")
+        bottom.setStyleSheet(
+            "QFrame#historyLogBox { background-color: #F7EEE2;"
+            " border: 1px solid #BDB6AA; border-radius: 15px; }"
+            "QLabel { background: transparent; border: none; }"
+        )
+        bottom_layout = QVBoxLayout(bottom)
+        bottom_layout.setContentsMargins(14, 6, 14, 14)
+        bottom_layout.setSpacing(6)
+        label_bot = QLabel("Logs")
+        label_bot.setStyleSheet("font-size: 16px; font-weight: 600; color: black;")
+        bottom_layout.addWidget(label_bot)
+        bottom_layout.addWidget(self.history_log)
+        layout.addWidget(top)
+        layout.addWidget(bottom, stretch=1)
+        return page
+
     def _build_placeholder_page(self, title: str) -> QWidget:
         page, layout = _page_widget(title)
         hint = QLabel("Nothing here yet.")
@@ -1314,9 +1458,73 @@ class MainWindow(QMainWindow):
         row.addWidget(self.apps_remove_button)
         return row
 
+    def _add_history_entry(self, task: str, action: str, status: str) -> None:
+        try:
+            if hasattr(self, 'history_list'):
+                stamp = QDateTime.currentDateTime().toString("yyyy-MM-dd HH:mm:ss")
+                self.history_list.insertRow(0)
+                for c, val in enumerate([str(task), str(action), str(stamp), str(status)]):
+                    it = QTableWidgetItem(val)
+                    it.setFlags(it.flags() & ~Qt.ItemIsEditable)
+                    if c == 1:
+                        it.setToolTip(val)
+                    bg = QColor(STRIPE_COLOR) if 0 % 2 == 1 else QColor(ROW_COLOR)
+                    it.setBackground(bg)
+                    self.history_list.setItem(0, c, it)
+                # stripe all rows
+                for r in range(self.history_list.rowCount()):
+                    bg = QColor(STRIPE_COLOR) if r % 2 == 1 else QColor(ROW_COLOR)
+                    for c in range(self.history_list.columnCount()):
+                        it = self.history_list.item(r, c)
+                        if it:
+                            it.setBackground(bg)
+                self.history_list.resizeColumnsToContents()
+                if self.history_list.columnWidth(0) < 220:
+                    self.history_list.setColumnWidth(0, 220)
+                if self.history_list.columnWidth(1) < 220:
+                    self.history_list.setColumnWidth(1, 220)
+                if self.history_list.columnWidth(2) < 200:
+                    self.history_list.setColumnWidth(2, 200)
+        except Exception:
+            pass
+
     def log(self, message: str) -> None:
         stamp = QTime.currentTime().toString("HH:mm:ss")
-        print(f"[{stamp}] {message}")
+        line = f"[{stamp}] {message}"
+        print(line)
+        try:
+            if hasattr(self, 'history_log'):
+                item = QListWidgetItem(line)
+                item.setFlags(item.flags() & ~Qt.ItemIsSelectable)
+                self.history_log.addItem(item)
+                self.history_log.scrollToBottom()
+        except Exception:
+            pass
+        try:
+            m = message
+            if m.startswith("["):
+                # already prefixed
+                pass
+            # detect events
+            if "applications: started" in m or ("Looking for applications" in m and "started" not in m.lower()):
+                pass
+            if "applications: FAILED" in m:
+                self._add_history_entry("Applications:scan", "-", "Failed")
+            elif m.strip().startswith("applications: cancelled") or "cancelled" in m and "applications" in m:
+                if "scan" in getattr(self, '_apps_action', '') or 'scan' in m.lower():
+                    self._add_history_entry("Applications:scan", "-", "Canceled")
+                else:
+                    self._add_history_entry("Applications:remove", "-", "Canceled")
+            elif m.strip().startswith("applications:") and "found" in m:
+                # found count logged elsewhere? try to infer
+                self._add_history_entry("Applications:scan", m.split("applications:")[-1].strip(), "Successfull")
+            elif "remove" in m.lower() and "applications" in m.lower() and ("done" in m.lower() or "→ done" in m):
+                # count will be added from results; add generic if not
+                self._add_history_entry("Applications:remove", m.split("remove")[-1].strip() if "remove" in m else "-", "Successfull")
+            elif "schedule" in m.lower() and "fired" in m.lower():
+                self._add_history_entry("Schedule:run", "-", "Successfull")
+        except Exception:
+            pass
 
     def _build_schedule_page(self) -> QWidget:
         # "Schedule" appears only in the top header, not as a page heading.
@@ -1409,8 +1617,16 @@ class MainWindow(QMainWindow):
         """The button shows 'Cancel' while it is the one running: cancel instead."""
         if self._active_action is not None:
             if self._active_action == action:
+                try:
+                    self._cleanup_action_was = action
+                except Exception:
+                    pass
                 self.runner.cancel_all()
             return
+        try:
+            self._cleanup_action_was = action
+        except Exception:
+            pass
         if action == "scan":
             self._scan_all()
         else:
@@ -1453,6 +1669,7 @@ class MainWindow(QMainWindow):
             return
         if self._apps_action is not None:
             return
+        self._apps_action_was = "scan"
         self._scan_applications()
 
     def _scan_applications(self) -> None:
@@ -1477,6 +1694,16 @@ class MainWindow(QMainWindow):
         self._update_apps_buttons()
         self._update_apps_info()
         self.log(f"applications: {len(apps)} found")
+        try:
+            self._add_history_entry("Applications:scan", f"{len(apps)} found", "Successfull")
+            if self.history_list.columnWidth(0) < 220:
+                self.history_list.setColumnWidth(0, 220)
+            if self.history_list.columnWidth(1) < 220:
+                self.history_list.setColumnWidth(1, 220)
+            if self.history_list.columnWidth(2) < 200:
+                self.history_list.setColumnWidth(2, 200)
+        except Exception:
+            pass
 
     def _on_apps_failed(self, _task_id: str, error: str) -> None:
         self._apps_action = None
@@ -1484,6 +1711,10 @@ class MainWindow(QMainWindow):
         self._update_apps_buttons()
         self.apps_info_label.setText("Looking for the applications failed")
         self.log(f"applications: FAILED\n{error}")
+        try:
+            self._add_history_entry("Applications:scan", "-", "Failed")
+        except Exception:
+            pass
 
     def _on_apps_cancelled(self, _task_id: str) -> None:
         self._apps_action = None
@@ -1491,6 +1722,13 @@ class MainWindow(QMainWindow):
         self._update_apps_buttons()
         self.apps_info_label.setText("Looking for the applications was cancelled")
         self.log("applications: cancelled")
+        try:
+            if getattr(self, '_apps_action_was', None) == 'remove':
+                self._add_history_entry("Applications:remove", "-", "Canceled")
+            else:
+                self._add_history_entry("Applications:scan", "-", "Canceled")
+        except Exception:
+            pass
 
     def _on_apps_progress(self, _task_id: str, _percent: int, message: str) -> None:
         """Say what the running worker is doing."""
@@ -1547,6 +1785,7 @@ class MainWindow(QMainWindow):
         )
         if answer != QMessageBox.StandardButton.Yes:
             return
+        self._apps_action_was = "remove"
         self._remove_applications(apps)
 
     def _remove_applications(self, apps: list[Application]) -> None:
@@ -1579,6 +1818,13 @@ class MainWindow(QMainWindow):
             self.log(f"remove {app.source}: {app.package} → {'done' if ok else 'failed'}")
             if message and not ok:
                 self.log(f"    {message}")
+        try:
+            if failed:
+                self._add_history_entry("Applications:remove", f"{len(removed)} removed, {len(failed)} failed", "Failed")
+            else:
+                self._add_history_entry("Applications:remove", f"{len(removed)} removed", "Successfull")
+        except Exception:
+            pass
 
     def _reset_found(self, status: str) -> None:
         self._found_bytes = 0
@@ -1668,6 +1914,16 @@ class MainWindow(QMainWindow):
         self._add_found(result)
         self.results.show_result(result)
         self.log(result.summary())
+        try:
+            action = getattr(self, '_cleanup_action_was', None) or getattr(self, '_active_action', None)
+            if action == 'scan':
+                task_name = TASKS.get(task_id).name if task_id in TASKS else task_id
+                self._add_history_entry(f"Cleanup:{task_name}:scan", f"{result.files} files · {human_size(result.bytes)}", "Successfull")
+            elif action == 'cleanup':
+                task_name = TASKS.get(task_id).name if task_id in TASKS else task_id
+                self._add_history_entry(f"Cleanup:{task_name}:remove", f"{result.files} files · {human_size(result.bytes)}", "Successfull")
+        except Exception:
+            pass
         for path in result.paths[:20]:
             self.log(f"    {path}")
         if len(result.paths) > 20:
@@ -1676,12 +1932,34 @@ class MainWindow(QMainWindow):
     def _on_failed(self, task_id: str, error: str) -> None:
         self._set_idle(task_id, "failed")
         self.log(f"{task_id}: FAILED\n{error}")
+        try:
+            action = getattr(self, '_cleanup_action_was', None) or getattr(self, '_active_action', None)
+            task_name = TASKS.get(task_id).name if task_id in TASKS else task_id
+            if action == 'scan':
+                self._add_history_entry(f"Cleanup:{task_name}:scan", "-", "Failed")
+            elif action == 'cleanup':
+                self._add_history_entry(f"Cleanup:{task_name}:remove", "-", "Failed")
+            else:
+                self._add_history_entry(task_name, "-", "Failed")
+        except Exception:
+            pass
 
     def _on_cancelled(self, task_id: str) -> None:
         if bar := self.bars.get(task_id):
             bar.setValue(0)
         self._set_idle(task_id, "cancelled")
         self.log(f"{task_id}: cancelled")
+        try:
+            action = getattr(self, '_cleanup_action_was', None)
+            task_name = TASKS.get(task_id).name if task_id in TASKS else task_id
+            if action == 'scan':
+                self._add_history_entry(f"Cleanup:{task_name}:scan", "-", "Canceled")
+            elif action == 'cleanup':
+                self._add_history_entry(f"Cleanup:{task_name}:remove", "-", "Canceled")
+            else:
+                self._add_history_entry(task_name, "-", "Canceled")
+        except Exception:
+            pass
 
     def _on_running_changed(self, count: int) -> None:
         self.running_label.setText(f"{count} task(s) running" if count else "Idle")
