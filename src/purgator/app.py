@@ -33,11 +33,14 @@ def main(argv: list[str] | None = None) -> int:
     if args.run:
         return run_headless(args.run, args.delete, args.root)
 
+    from PySide6.QtCore import QLoggingCategory
     from PySide6.QtGui import QFont, QIcon
     from PySide6.QtWidgets import QApplication
 
     from purgator.ui import MainWindow
 
+    # Third-party app icons with heavy masks/filters make QtSvg spam warnings
+    QLoggingCategory.setFilterRules("qt.svg.draw.warning=false")
     app = QApplication([sys.argv[0], *qt_args])
     app.setOrganizationName("purgator")
     app.setApplicationName("purgator")
