@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import shutil
+import subprocess
 from datetime import datetime
 from pathlib import Path
 
@@ -220,6 +221,10 @@ class _RatioBar(QWidget):
     def __init__(self, frac: float, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._frac = max(0.0, min(1.0, frac))
+
+    def set_frac(self, frac: float) -> None:
+        self._frac = max(0.0, min(1.0, frac))
+        self.update()
 
     def paintEvent(self, event) -> None:
         painter = QPainter(self)
@@ -763,6 +768,39 @@ class _ApplicationList(QTreeWidget):
                 self.takeTopLevelItem(index)
 
 
+class _HomeSizeScan:
+    """Measures /home with du off the GUI thread; it can take seconds."""
+
+    id = "home_size"
+
+    def __init__(self, path: str) -> None:
+        self.path = path
+        self.dry_run = True
+
+    def run(self, report, is_cancelled):
+        proc = subprocess.Popen(
+            ["du", "-s", "--block-size=1", self.path],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+        )
+        while proc.poll() is None:
+            if is_cancelled():
+                proc.kill()
+                proc.wait()
+                raise Cancelled
+            try:
+                proc.wait(timeout=0.2)
+            except subprocess.TimeoutExpired:
+                pass
+        out = proc.stdout.read()
+        # du exits 1 on unreadable dirs but still prints the total
+        try:
+            return int(out.split()[0])
+        except (IndexError, ValueError):
+            return shutil.disk_usage(self.path).used
+
+
 class _ApplicationsScan:
     """Looks for the installed applications; the worker only needs the two
     methods of a task: the id and the run.
@@ -1174,21 +1212,10 @@ class MainWindow(QMainWindow):
             except Exception:
                 continue
         usage = shutil.disk_usage(root_path)
-        # compute home size from root fs perspective for accuracy
-        home_size = usage.used
-        try:
-            import subprocess
-            home_path_on_root = "/home"
-            if root_path == "/run/host/root":
-                home_path_on_root = "/run/host/root/home"
-            r = subprocess.run(["du", "-s", "--block-size=1", home_path_on_root], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-            if r.returncode == 0:
-                home_size = int(r.stdout.split()[0])
-            else:
-                home_size = shutil.disk_usage("/home").used
-        except Exception:
-            home_size = shutil.disk_usage("/home").used
-        home_usage = type("U", (), {"total": usage.total, "used": home_size, "free": usage.free})()
+        self._disk_used = usage.used
+        home_path_on_root = "/home"
+        if root_path == "/run/host/root":
+            home_path_on_root = "/run/host/root/home"
         page = QWidget()
         layout = QVBoxLayout(page)
         layout.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignHCenter)
@@ -1224,7 +1251,7 @@ class MainWindow(QMainWindow):
         separator.setFixedHeight(1)
         box_layout.addWidget(separator)
         box_layout.addSpacing(8)
-        bar_view = self._build_home_to_disk_bar(home_usage, usage)
+        bar_view = self._build_home_to_disk_bar()
         box_layout.addWidget(bar_view)
         box_layout.addSpacing(60)
 
@@ -1249,6 +1276,11 @@ class MainWindow(QMainWindow):
         row.addWidget(right_container, alignment=Qt.AlignmentFlag.AlignTop)
         layout.addLayout(row)
         layout.addStretch()
+
+        worker = Worker(_HomeSizeScan(home_path_on_root))
+        self._home_size_worker = worker  # the pool does not delete it
+        worker.signals.finished.connect(self._on_home_size)
+        self.runner.pool.start(worker)
         return page
 
     def _build_disk_usage_chart(self, usage, width: int = 360, height: int = 380) -> QWidget:
@@ -1275,17 +1307,10 @@ class MainWindow(QMainWindow):
         center.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         return view
 
-    def _build_home_to_disk_bar(self, home_usage, disk_usage) -> QWidget:
-        occupied = disk_usage.used
-        home_used = home_usage.used
-
-        if occupied <= 0:
-            occupied = 1
-
-        home_frac = home_used / occupied
-
+    def _build_home_to_disk_bar(self) -> QWidget:
         bar_width = 300
-        bar = _RatioBar(home_frac)
+        bar = _RatioBar(0.0)
+        self._home_bar = bar
         bar.setFixedHeight(12)
         bar.setFixedWidth(bar_width)
 
@@ -1293,7 +1318,8 @@ class MainWindow(QMainWindow):
         section_title.setStyleSheet("font-size: 20px; font-weight: 600; color: black; background: transparent;")
         section_title.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
 
-        lbl = QLabel(f"<span style='font-size:16px;color:black;'>{home_used/(1024**3):.0f} GiB</span>")
+        lbl = QLabel("<span style='font-size:16px;color:black;'>… GiB</span>")
+        self._home_size_label = lbl
         lbl.setStyleSheet("background: transparent;")
         lbl.setFixedWidth(bar_width)
         lbl.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
@@ -1308,12 +1334,23 @@ class MainWindow(QMainWindow):
         vbox.addSpacing(4)
         vbox.addWidget(bar, alignment=Qt.AlignmentFlag.AlignHCenter)
         vbox.addSpacing(16)
-        pct = QLabel(f"<span style='font-size:16px;color:black;'>{home_frac * 100:.0f}% of disk space is used by your files</span>")
+        pct = QLabel("<span style='font-size:16px;color:black;'>Measuring your files…</span>")
+        self._home_pct_label = pct
         pct.setStyleSheet("background: transparent;")
         pct.setAlignment(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter)
         vbox.addWidget(pct, alignment=Qt.AlignmentFlag.AlignHCenter)
 
         return container
+
+    def _on_home_size(self, _task_id: str, home_used: int) -> None:
+        home_frac = home_used / max(self._disk_used, 1)
+        self._home_bar.set_frac(home_frac)
+        self._home_size_label.setText(
+            f"<span style='font-size:16px;color:black;'>{home_used/(1024**3):.0f} GiB</span>"
+        )
+        self._home_pct_label.setText(
+            f"<span style='font-size:16px;color:black;'>{home_frac * 100:.0f}% of disk space is used by your files</span>"
+        )
 
     def _build_history_page(self) -> QWidget:
         page, layout = _page_widget("History", with_heading=False)
@@ -2039,5 +2076,6 @@ class MainWindow(QMainWindow):
         )
 
     def closeEvent(self, event: QCloseEvent) -> None:
+        self._home_size_worker.cancel()
         self.runner.shutdown()
         super().closeEvent(event)
