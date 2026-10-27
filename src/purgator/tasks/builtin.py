@@ -42,7 +42,10 @@ class _EntriesTask(PurgeTask):
     def run(self, report: Reporter, is_cancelled: CancelCheck) -> TaskResult:
         result = TaskResult(self.id, dry_run=self.dry_run)
         report(-1, "Collecting candidates…")
-        entries = self.candidates(is_cancelled)
+        if self.only is not None:
+            entries = sorted(self.only)  # the user picked what to delete
+        else:
+            entries = self.candidates(is_cancelled)
         for i, path in enumerate(entries, 1):
             if is_cancelled():
                 raise Cancelled
@@ -50,6 +53,9 @@ class _EntriesTask(PurgeTask):
             result.files += files
             result.bytes += size
             result.paths.append(path)
+            result.sizes[path] = size
+            if path.is_dir() and not path.is_symlink():
+                result.directories.add(path)
             if not self.dry_run:
                 remove_path(path)
             report(i * 100 // len(entries), f"{path} ({human_size(size)})")
