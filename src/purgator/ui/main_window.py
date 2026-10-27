@@ -805,6 +805,12 @@ class _NewTaskDialog(QDialog):
         self.setStyleSheet(
             "QDialog { background-color: #F7EEE2; }"
             "QLabel { font-size: 17px; color: black; background: transparent; }"
+            "QComboBox { background-color: #F7EEE2; color: black; border: none; }"
+            "QComboBox::drop-down { border: none; background: transparent; width: 24px; }"
+            "QDateEdit, QTimeEdit, QSpinBox { background-color: #F7EEE2; color: black; border: none; }"
+            "QDateEdit::calendar-button, QTimeEdit::calendar-button"
+            " { border: none; background: transparent; }"
+            "QSpinBox::up-button, QSpinBox::down-button { border: none; background: transparent; }"
         )
 
         layout = QVBoxLayout(self)
@@ -832,6 +838,31 @@ class _NewTaskDialog(QDialog):
         self.hour_edit.setDisplayFormat("HH:mm")
         self.hour_edit.setTime(QTime(3, 0))
         self.hour_edit.setCalendarPopup(True)
+
+        # The selected text is drawn in white on the deep accent colour of the
+        # app; the focused dropdown shows the selected option the same way.
+        for input_widget in (
+            self.task_combo,
+            self.date_edit,
+            self.hour_edit,
+            self.every_spin,
+            self.unit_combo,
+        ):
+            palette = input_widget.palette()
+            palette.setColor(QPalette.ColorRole.Base, QColor(ROW_COLOR))
+            palette.setColor(QPalette.ColorRole.Text, QColor("#000000"))
+            palette.setColor(QPalette.ColorRole.Highlight, QColor("#4E4242"))
+            palette.setColor(QPalette.ColorRole.HighlightedText, QColor("#FFFFFF"))
+            input_widget.setPalette(palette)
+
+        for combo in (self.task_combo, self.unit_combo):
+            if view := combo.view():
+                view_palette = view.palette()
+                view_palette.setColor(QPalette.ColorRole.Base, QColor(ROW_COLOR))
+                view_palette.setColor(QPalette.ColorRole.Text, QColor("#000000"))
+                view_palette.setColor(QPalette.ColorRole.Highlight, QColor("#4E4242"))
+                view_palette.setColor(QPalette.ColorRole.HighlightedText, QColor("#FFFFFF"))
+                view.setPalette(view_palette)
 
         frequency = QHBoxLayout()
         frequency.setContentsMargins(0, 0, 0, 0)
@@ -1335,7 +1366,7 @@ class MainWindow(QMainWindow):
         header.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
         header.setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
         header.setStretchLastSection(False)
-        self.jobs_table.setColumnWidth(0, 26)
+        self.jobs_table.setColumnWidth(0, 70)
         self.jobs_table.setColumnWidth(2, 76)
         self.jobs_table.setColumnWidth(3, 44)
         self.jobs_table.setColumnWidth(4, 4)
