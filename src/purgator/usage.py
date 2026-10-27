@@ -8,6 +8,8 @@ in the few places that leave a trace:
   - the folders where an application keeps its settings (~/.config and the
     like): the last change of them is close to the last time it was open
   - the program itself: when it starts, its own file is read
+  - Steam, which writes down when every game was played
+  - the IDEs of JetBrains, which keep their settings in folders of their own
 
 An application without any of these was never used, or was used long before the
 traces began to be kept.
@@ -15,10 +17,11 @@ traces began to be kept.
 
 from __future__ import annotations
 
+import json
 import re
 import time
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 
 from purgator.host import access_times, list_names, read_text
@@ -39,6 +42,16 @@ SETTINGS_FOLDERS: tuple[Path, ...] = (
 # The flatpaks keep their things here
 FLATPAK_FOLDER = Path.home() / ".var/app"
 
+# Where Steam can live: the package, the old link and the flatpak
+STEAM_ROOTS: tuple[Path, ...] = (
+    Path.home() / ".local/share/Steam",
+    Path.home() / ".steam/steam",
+    FLATPAK_FOLDER / "com.valvesoftware.Steam/.local/share/Steam",
+)
+
+# The vendors the IDEs of JetBrains keep their folders under
+JETBRAINS_VENDORS: tuple[str, ...] = ("JetBrains", "Google")
+
 # An application that was not touched for that many days is old
 OLD_DAYS = 90
 
@@ -47,6 +60,10 @@ OLD_DAYS = 90
 _APPLICATION = re.compile(
     r'<bookmark:application count="(\d+)" exec="([^"]*)" modified="([^"]*)" name="([^"]*)"'
 )
+
+# A line of the files of Steam looks like this:
+#   "LastPlayed"		"1793055086"
+_STEAM_FIELD = re.compile(r'^\s*"([^"]+)"\s+"([^"]*)"', re.MULTILINE)
 
 
 @dataclass(frozen=True)
@@ -143,6 +160,58 @@ def add_flatpak_times(index: UsageIndex, app_ids: list[str]) -> None:
             index.add(app_id, when, "the last change of its settings")
 
 
+def add_steam_times(index: UsageIndex) -> None:
+    """Steam keeps the moment every game was played in its manifests."""
+    for library in _steam_libraries():
+        folder = library / "steamapps"
+        for name in list_names(folder):
+            if not (name.startswith("appmanifest_") and name.endswith(".acf")):
+                continue
+            fields = dict(_STEAM_FIELD.findall(read_text(folder / name)))
+            played = fields.get("LastPlayed", "")
+            if played.isdigit():
+                key = f"steam:{fields.get('appid', '')}"
+                index.add(key, int(played), "the last time Steam started it")
+
+
+def _steam_libraries() -> list[Path]:
+    """The folders Steam installs its games into."""
+    libraries: list[Path] = []
+    for root in STEAM_ROOTS:
+        text = read_text(root / "steamapps/libraryfolders.vdf")
+        paths = [Path(v) for k, v in _STEAM_FIELD.findall(text) if k == "path"] or [root]
+        for path in paths:
+            if path not in libraries:
+                libraries.append(path)
+    return libraries
+
+
+def add_jetbrains_times(index: UsageIndex, programs: list[str]) -> set[str]:
+    """The IDEs of JetBrains name their folders after the version; gives back the IDEs."""
+    found: set[str] = set()
+    for program in programs:
+        if not program.startswith("/"):
+            continue
+        install = Path(program).parent.parent  # the program lives in <install>/bin
+        try:
+            info = json.loads(read_text(install / "product-info.json") or "{}")
+        except ValueError:
+            continue
+        folder = info.get("dataDirectoryName") if isinstance(info, dict) else None
+        if not folder:
+            continue
+        found.add(program)
+        for vendor in JETBRAINS_VENDORS:
+            # only the running IDE writes here; Toolbox rewrites the rest of them
+            for path in (
+                Path.home() / ".config" / vendor / folder / "options",
+                Path.home() / ".config" / vendor / folder / "workspace",
+                Path.home() / ".cache" / vendor / folder / "log",
+            ):
+                index.add(program, _newest_mtime(path), "the last change of its settings")
+    return found
+
+
 def _newest_mtime(path: Path, depth: int = 1) -> float:
     """The newest moment that something inside the folder changed."""
     try:
@@ -177,7 +246,8 @@ def describe(when: float) -> str:
     """Say how long ago that was, in words the user understands."""
     if when <= 0:
         return "never"
-    days = int((time.time() - when) // 86400)
+    # calendar days, so 23:00 yesterday is not "today" at 20:00
+    days = (date.today() - date.fromtimestamp(when)).days
     if days <= 0:
         return "today"
     if days == 1:

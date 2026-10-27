@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import configparser
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -23,7 +24,13 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Callable
 
-from purgator.usage import add_flatpak_times, add_program_times, collect_usage
+from purgator.usage import (
+    add_flatpak_times,
+    add_jetbrains_times,
+    add_program_times,
+    add_steam_times,
+    collect_usage,
+)
 
 # report(percent, message) is not needed here; the scan only reports at the end
 CancelCheck = Callable[[], bool]
@@ -67,6 +74,9 @@ COMMAND_TIMEOUT = 30
 # How long a removal may take; the password window waits for the user
 REMOVE_TIMEOUT = 600
 
+# A desktop entry of a Steam game starts Steam with this address
+STEAM_GAME = re.compile(r"steam://rungameid/(\d+)")
+
 # The size of the units the package managers use
 SIZE_UNITS = {"": 1, "b": 1, "k": 1024, "m": 1024**2, "g": 1024**3, "t": 1024**4}
 
@@ -88,6 +98,7 @@ class Application:
     used_from: str = ""  # where that moment comes from
     program: str = ""  # the program it starts, for the trace of the usage
     icon: str = ""  # a name of the icon theme or the path of an image
+    steam_game: str = ""  # the id of the game, for the entries Steam made
 
 
 def discover_applications(is_cancelled: CancelCheck | None = None) -> list[Application]:
@@ -241,8 +252,12 @@ def _fill_usage(apps: list[Application]) -> None:
     if not apps:
         return
     index = collect_usage()
-    add_program_times(index, [app.program for app in apps if app.program])
+    programs = [app.program for app in apps if app.program]
+    # Toolbox reads the files of the IDEs, so only their settings count
+    ides = add_jetbrains_times(index, programs)
+    add_program_times(index, [program for program in programs if program not in ides])
     add_flatpak_times(index, [app.package for app in apps if app.source == "flatpak"])
+    add_steam_times(index)
     for position, app in enumerate(apps):
         found = index.get(_usage_keys(app))
         apps[position] = replace(app, last_used=found.when, used_from=found.source)
@@ -250,9 +265,12 @@ def _fill_usage(apps: list[Application]) -> None:
 
 def _usage_keys(app: Application) -> list[str]:
     """The names an application can be known by in the traces of the usage."""
+    if app.steam_game:
+        # the program is Steam itself, so only Steam knows when the game ran
+        return [f"steam:{app.steam_game}"]
     keys = [app.package, app.name]
     if app.program:
-        keys.append(Path(app.program).name)
+        keys.extend((app.program, Path(app.program).name))
     if app.path is not None:
         keys.append(app.path.stem)
     return [key for key in keys if key]
@@ -421,7 +439,9 @@ def _read_desktop_entry(entry: Path, directory: Path) -> Application | None:
     name = data.get("Name", "").strip()
     if hidden or not name:
         return None
-    program = _program_of(data.get("Exec", ""))
+    exec_line = data.get("Exec", "")
+    program = _program_of(exec_line)
+    steam_game = STEAM_GAME.search(exec_line)
     return Application(
         name=name,
         source="desktop",
@@ -432,12 +452,16 @@ def _read_desktop_entry(entry: Path, directory: Path) -> Application | None:
         path=entry,
         program=program,
         icon=data.get("Icon", "").strip(),
+        steam_game=steam_game.group(1) if steam_game else "",
     )
 
 
 def _program_of(exec_line: str) -> str:
     """The program a desktop entry starts."""
-    parts = exec_line.split()
+    try:
+        parts = shlex.split(exec_line)  # the path may be in quotes
+    except ValueError:
+        parts = exec_line.split()
     if not parts:
         return ""
     program = parts[0]
