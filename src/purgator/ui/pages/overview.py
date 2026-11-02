@@ -1,13 +1,26 @@
 import shutil
 import subprocess
+from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QThreadPool
-from PySide6.QtWidgets import QFrame, QGroupBox, QHBoxLayout, QLabel, QVBoxLayout, QWidget
+from PySide6.QtCore import QSize, Qt, QThreadPool
+from PySide6.QtGui import QColor
+from PySide6.QtWidgets import (
+    QFrame,
+    QGroupBox,
+    QHBoxLayout,
+    QLabel,
+    QListWidget,
+    QListWidgetItem,
+    QSizePolicy,
+    QVBoxLayout,
+    QWidget,
+)
 
-from purgator.tasks import Cancelled
-from purgator.ui.colors import BACKGROUND, BORDER, TEXT
-from purgator.ui.components import RatioBar, RingChart, page_layout
+from purgator.scheduler import CronScheduler
+from purgator.tasks import TASKS, Cancelled, human_size
+from purgator.ui.colors import BACKGROUND, BORDER, HINT, TEXT
+from purgator.ui.components import RatioBar, RingChart, ThinScrollBar, page_layout
 from purgator.workers import Worker
 
 BOX_STYLE = (
@@ -52,8 +65,14 @@ class _HomeSizeScan:
 class OverviewPage(QWidget):
     """The disk usage, the share of the home directory and the scheduled tasks."""
 
-    def __init__(self, pool: QThreadPool, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        pool: QThreadPool,
+        scheduler: CronScheduler,
+        parent: QWidget | None = None,
+    ) -> None:
         super().__init__(parent)
+        self.scheduler = scheduler
         root_candidates = ["/run/host/root", "/home", "/"]
         root_path = "/"
         for c in root_candidates:
@@ -115,13 +134,56 @@ class OverviewPage(QWidget):
         right_title = QLabel("Scheduled tasks")
         right_title.setStyleSheet(TITLE_STYLE)
         right_layout.addWidget(right_title, alignment=Qt.AlignmentFlag.AlignLeft)
-        right_container.setFixedHeight(box.sizeHint().height() // 2)
+        self._scheduled_list = QListWidget()
+        self._scheduled_list.setSelectionMode(QListWidget.SelectionMode.NoSelection)
+        self._scheduled_list.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._scheduled_list.setWordWrap(True)
+        self._scheduled_list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._scheduled_list.setVerticalScrollBar(
+            ThinScrollBar(Qt.Orientation.Vertical, self._scheduled_list)
+        )
+        self._scheduled_list.setStyleSheet(
+            f"QListWidget {{ background: {BACKGROUND}; border: none; outline: none;"
+            " font-size: 14px; }"
+            f"QListWidget::item {{ background: {BACKGROUND}; color: {TEXT};"
+            f" border-bottom: 1px solid {BORDER}; }}"
+            f"QListWidget::item:selected {{ background: {BACKGROUND}; color: {TEXT}; }}"
+        )
+        right_layout.addWidget(self._scheduled_list, stretch=1)
+        box_height = box.sizeHint().height()
+        scheduled_height = box_height // 2
+        right_container.setFixedHeight(scheduled_height)
+        self.scheduler.jobs_changed.connect(self._refresh_scheduled_tasks)
+        self._refresh_scheduled_tasks()
+
+        activity_container = QGroupBox()
+        activity_container.setFixedWidth(box_width)
+        activity_container.setStyleSheet(BOX_STYLE)
+        activity_layout = QVBoxLayout(activity_container)
+        activity_layout.setContentsMargins(10, 10, 10, 10)
+        activity_layout.setSpacing(10)
+        activity_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+        activity_title = QLabel("Last activity")
+        activity_title.setStyleSheet(TITLE_STYLE)
+        activity_layout.addWidget(activity_title, alignment=Qt.AlignmentFlag.AlignLeft)
+        self._scan_label = self._build_activity_label("Last scan")
+        self._cleanup_label = self._build_activity_label("Last cleanup")
+        activity_layout.addWidget(self._scan_label)
+        activity_layout.addWidget(self._cleanup_label)
+        activity_layout.addStretch()
+        activity_container.setFixedHeight(box_height - scheduled_height - 12)
+
+        right_column = QVBoxLayout()
+        right_column.setSpacing(12)
+        right_column.setAlignment(Qt.AlignmentFlag.AlignTop)
+        right_column.addWidget(right_container)
+        right_column.addWidget(activity_container)
 
         row = QHBoxLayout()
         row.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignHCenter)
         row.setSpacing(60)
         row.addWidget(box, alignment=Qt.AlignmentFlag.AlignTop)
-        row.addWidget(right_container, alignment=Qt.AlignmentFlag.AlignTop)
+        row.addLayout(right_column)
         layout.addLayout(row)
         layout.addStretch()
 
@@ -129,6 +191,72 @@ class OverviewPage(QWidget):
         self._home_size_worker = worker  # the pool does not delete it
         worker.signals.finished.connect(self._on_home_size)
         pool.start(worker)
+
+    @staticmethod
+    def _build_activity_label(title: str) -> QLabel:
+        label = QLabel(
+            f"<span style='font-size:14px;color:{HINT};'>{title}</span><br>"
+            f"<span style='font-size:15px;color:{HINT};'>never</span>"
+        )
+        label.setWordWrap(True)
+        label.setStyleSheet("background: transparent;")
+        return label
+
+    def record_run(self, action: str, files: int, bytes_: int) -> None:
+        """Show when the last scan or cleanup happened and what it touched."""
+        if action not in ("scan", "cleanup"):
+            return
+        when = datetime.now()
+        files_text = "1 file" if files == 1 else f"{files} files"
+        if action == "scan":
+            label = self._scan_label
+            title, verb = "Last scan", "found"
+        else:
+            label = self._cleanup_label
+            title, verb = "Last cleanup", "cleaned"
+        label.setText(
+            f"<span style='font-size:14px;color:{HINT};'>{title}</span><br>"
+            f"<span style='font-size:15px;color:{TEXT};'>{when:%Y-%m-%d %H:%M}</span><br>"
+            f"<span style='font-size:15px;color:{TEXT};'>"
+            f"{files_text} · {human_size(bytes_)} {verb}</span>"
+        )
+
+    def _refresh_scheduled_tasks(self) -> None:
+        """Show every scheduled job with its next run."""
+        self._scheduled_list.clear()
+        if not self.scheduler.jobs:
+            empty = QListWidgetItem("No scheduled tasks")
+            empty.setForeground(QColor(HINT))
+            empty.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            empty.setSizeHint(QSize(0, 36))
+            self._scheduled_list.addItem(empty)
+            return
+        for job in self.scheduler.jobs:
+            row = QWidget()
+            row.setStyleSheet("background: transparent;")
+            line = QHBoxLayout(row)
+            line.setContentsMargins(4, 0, 4, 0)
+            line.setSpacing(8)
+
+            colour = TEXT if job.enabled else HINT
+            name = QLabel(TASKS[job.task_id].name)
+            name.setStyleSheet(
+                f"color: {colour}; background: transparent; font-size: 14px;"
+            )
+            name.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+            status = QLabel("Active" if job.enabled else "Inactive")
+            status.setStyleSheet(
+                f"color: {colour}; background: transparent; font-size: 14px;"
+            )
+            status.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+
+            line.addWidget(name)
+            line.addWidget(status)
+
+            item = QListWidgetItem()
+            item.setSizeHint(QSize(0, 36))
+            self._scheduled_list.addItem(item)
+            self._scheduled_list.setItemWidget(item, row)
 
     def _build_disk_usage_chart(self, usage, width: int = 360, height: int = 380) -> QWidget:
         used_gb = usage.used / (1024**3)

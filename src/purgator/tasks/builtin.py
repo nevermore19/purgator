@@ -105,6 +105,27 @@ class StaleFilesTask(_EntriesTask):
         return sorted(found)
 
 
+class CustomPathTask(_EntriesTask):
+    id = "custom_path"
+    name = "Custom path"
+
+    def __init__(self, dry_run: bool = True, root: Path | None = None) -> None:
+        super().__init__(dry_run)
+        self.root = Path(root) if root is not None else Path.home()
+
+    def candidates(self, is_cancelled: CancelCheck) -> list[Path]:
+        try:
+            return sorted(self.root.iterdir())
+        except OSError:
+            return []
+
+
+def make_custom_path_task(task_id: str, name: str) -> type[CustomPathTask]:
+    return type(
+        f"CustomPathTask_{task_id}", (CustomPathTask,), {"id": task_id, "name": name}
+    )
+
+
 class ProjectBuildsTask(_EntriesTask):
     id = "project_builds"
     name = "Clean project builds"

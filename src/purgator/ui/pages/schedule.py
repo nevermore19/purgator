@@ -248,6 +248,7 @@ class SchedulePage(QWidget):
 
         self.jobs_table = QTableWidget(0, 5)
         self.jobs_table.setHorizontalHeaderLabels(["Enabled", "Schedule", "Task", "Next run", ""])
+        self.jobs_table.verticalHeader().setVisible(False)
         header = self.jobs_table.horizontalHeader()
         header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)

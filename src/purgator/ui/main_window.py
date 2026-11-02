@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import uuid
 from pathlib import Path
 
 from PySide6.QtCore import QSettings, Qt
@@ -16,8 +18,8 @@ from PySide6.QtWidgets import (
 )
 
 from purgator.scheduler import CronScheduler
-from purgator.tasks import PurgeTask, create_task
-from purgator.tasks.builtin import ProjectBuildsTask
+from purgator.tasks import TASKS, PurgeTask, create_task
+from purgator.tasks.builtin import make_custom_path_task
 from purgator.ui.assets import ICONS_DIR
 from purgator.ui.colors import ACCENT, BACKGROUND, BORDER, TEXT
 from purgator.ui.pages import (
@@ -27,10 +29,17 @@ from purgator.ui.pages import (
     OverviewPage,
     PlaceholderPage,
     SchedulePage,
+    WhitelistPage,
 )
 from purgator.workers import TaskRunner
 
-BUILDS_ROOT_KEY = "tasks/project_builds/root"
+CUSTOM_TASK_PREFIX = "custom_"
+CUSTOM_TASKS_KEY = "whitelist/custom_tasks"
+
+
+def scan_root_key(task_id: str) -> str:
+    return f"tasks/{task_id}/root"
+
 
 NAV_ITEMS = [
     ("overview", "Overview"),
@@ -50,6 +59,7 @@ class MainWindow(QMainWindow):
         self.resize(1100, 720)
 
         self.settings = QSettings()
+        self._load_custom_tasks()
         self.runner = TaskRunner(self)
         self.scheduler = CronScheduler(self.runner, self.make_task, self.settings, self)
 
@@ -65,10 +75,14 @@ class MainWindow(QMainWindow):
         content.addWidget(self._build_nav())
 
         self.history = HistoryPage()
-        self.overview = OverviewPage(self.runner.pool)
+        self.overview = OverviewPage(self.runner.pool, self.scheduler)
         self.cleanup = CleanupPage(self.runner, self.make_task)
+        self.cleanup.run_finished.connect(self.overview.record_run)
         self.applications = ApplicationsPage(self.runner.pool)
         self.schedule = SchedulePage(self.scheduler)
+        self.whitelist = WhitelistPage(self._scan_roots())
+        self.whitelist.path_changed.connect(self._set_scan_root)
+        self.whitelist.task_added.connect(self._add_custom_task)
         for page in (self.cleanup, self.applications, self.schedule):
             page.logged.connect(self.history.log)
         for page in (self.cleanup, self.applications):
@@ -80,7 +94,7 @@ class MainWindow(QMainWindow):
         self.stack.addWidget(self.applications)
         self.stack.addWidget(self.schedule)
         self.stack.addWidget(self.history)
-        self.stack.addWidget(PlaceholderPage("Whitelist"))
+        self.stack.addWidget(self.whitelist)
         self.stack.addWidget(PlaceholderPage("Settings"))
         content.addWidget(self.stack, stretch=1)
 
@@ -162,10 +176,58 @@ class MainWindow(QMainWindow):
         self.running_label.setText(f"{count} task(s) running" if count else "Idle")
 
     def make_task(self, task_id: str, dry_run: bool = False) -> PurgeTask:
-        if task_id == ProjectBuildsTask.id:
-            root = self.settings.value(BUILDS_ROOT_KEY, str(Path.home()))
+        root = self.settings.value(scan_root_key(task_id))
+        if root:
             return create_task(task_id, dry_run=dry_run, root=Path(root))
         return create_task(task_id, dry_run=dry_run)
+
+    def _scan_roots(self) -> list[tuple[str, str, Path]]:
+        roots = []
+        for task_id, task_cls in TASKS.items():
+            task = self.make_task(task_id)
+            root = getattr(task, "root", None)
+            if root is not None:
+                roots.append((task_id, task_cls.name, Path(root)))
+        return roots
+
+    def _set_scan_root(self, task_id: str, root: str) -> None:
+        self.settings.setValue(scan_root_key(task_id), root)
+        self.settings.sync()
+
+    def _load_custom_tasks(self) -> None:
+        for task_id in [tid for tid in TASKS if tid.startswith(CUSTOM_TASK_PREFIX)]:
+            del TASKS[task_id]
+        try:
+            items = json.loads(self.settings.value(CUSTOM_TASKS_KEY, "[]"))
+        except (TypeError, ValueError):
+            items = []
+        self._custom_tasks: list[dict[str, str]] = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            task_id = item.get("id")
+            name = item.get("name")
+            if not isinstance(task_id, str) or not task_id.startswith(CUSTOM_TASK_PREFIX):
+                continue
+            if not isinstance(name, str) or not name.strip() or task_id in TASKS:
+                continue
+            TASKS[task_id] = make_custom_path_task(task_id, name)
+            self._custom_tasks.append({"id": task_id, "name": name})
+
+    def _save_custom_tasks(self) -> None:
+        self.settings.setValue(CUSTOM_TASKS_KEY, json.dumps(self._custom_tasks))
+        self.settings.sync()
+
+    def _add_custom_task(self, name: str, path: str) -> None:
+        task_id = f"{CUSTOM_TASK_PREFIX}{uuid.uuid4().hex[:8]}"
+        while task_id in TASKS:
+            task_id = f"{CUSTOM_TASK_PREFIX}{uuid.uuid4().hex[:8]}"
+        TASKS[task_id] = make_custom_path_task(task_id, name)
+        self.settings.setValue(scan_root_key(task_id), path)
+        self._custom_tasks.append({"id": task_id, "name": name})
+        self._save_custom_tasks()
+        self.cleanup.add_task_category(task_id, name)
+        self.whitelist.add_root(task_id, name, Path(path))
 
     def log(self, message: str) -> None:
         self.history.log(message)
