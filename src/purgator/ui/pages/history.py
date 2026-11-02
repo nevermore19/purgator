@@ -3,8 +3,7 @@ from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QHeaderView,
     QLabel,
-    QListWidget,
-    QListWidgetItem,
+    QPlainTextEdit,
     QTableWidget,
     QTableWidgetItem,
     QWidget,
@@ -46,14 +45,19 @@ class HistoryPage(QWidget):
         layout.addWidget(top)
         layout.addWidget(bottom, stretch=1)
 
-    def _build_log(self) -> QListWidget:
-        log = QListWidget()
+    def _build_log(self) -> QPlainTextEdit:
+        log = QPlainTextEdit()
+        log.setReadOnly(True)
+        log.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
+        log.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+            | Qt.TextInteractionFlag.TextSelectableByKeyboard
+        )
         log.setVerticalScrollBar(ThinScrollBar(Qt.Orientation.Vertical, log))
         log.setHorizontalScrollBar(ThinScrollBar(Qt.Orientation.Horizontal, log))
         log.setStyleSheet(
-            f"QListWidget {{ background-color: {BACKGROUND}; border: none; outline: none; font-size: 13px; }}"
-            "QListWidget::item { padding: 4px 6px; }"
-            f"QListWidget::item:selected {{ background: transparent; color: {TEXT}; }}"
+            f"QPlainTextEdit {{ background-color: {BACKGROUND}; color: {TEXT};"
+            " border: none; outline: none; font-size: 13px; padding: 4px 6px; }"
         )
         return log
 
@@ -117,10 +121,9 @@ class HistoryPage(QWidget):
         line = f"[{stamp}] {message}"
         print(line)
         try:
-            item = QListWidgetItem(line)
-            item.setFlags(item.flags() & ~Qt.ItemIsSelectable)
-            self.history_log.addItem(item)
-            self.history_log.scrollToBottom()
+            self.history_log.appendPlainText(line)
+            bar = self.history_log.verticalScrollBar()
+            bar.setValue(bar.maximum())
         except Exception:
             pass
         try:
