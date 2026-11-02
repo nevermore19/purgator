@@ -260,6 +260,7 @@ class CleanupPage(QWidget):
 
     logged = Signal(str)
     history_added = Signal(str, str, str)  # task, action, status
+    run_finished = Signal(str, int, object)  # action, files, bytes (may exceed 32 bits)
 
     def __init__(
         self,
@@ -296,6 +297,11 @@ class CleanupPage(QWidget):
             self.results.add_category(task_id, CATEGORY_LABELS.get(task_id, cls.name))
         column.addWidget(self.results, stretch=1)
         return container
+
+    def add_task_category(self, task_id: str, name: str) -> None:
+        if task_id in self.results._categories:
+            return
+        self.results.add_category(task_id, CATEGORY_LABELS.get(task_id, name))
 
     def _build_actions(self):
         self.info_label = QLabel("Nothing scanned yet")
@@ -433,7 +439,10 @@ class CleanupPage(QWidget):
     def _on_running_changed(self, count: int) -> None:
         busy = count > 0
         if not busy and not self._starting:
+            action = self._active_action
             self._active_action = None  # run is over: the buttons get their labels back
+            if action is not None:
+                self.run_finished.emit(action, self._found_files, self._found_bytes)
         # The button that started the run turns into "Cancel"; the other one stays disabled.
         self.scan_button.setText("Cancel" if self._active_action == "scan" else "Scan")
         self.cleanup_button.setText("Cancel" if self._active_action == "cleanup" else "Clean up")
