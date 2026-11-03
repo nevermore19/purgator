@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 16 16">
+  <defs>
+    <style>
+      .cls-1{fill:none;stroke:#4f4444;stroke-width:2;stroke-miterlimit:10}
+    </style>
+  </defs>
+  <title>Untitled-1</title>
+  <g id="Layer_1" data-name="Layer 1">
+    <line x1="8" y1="1.111" x2="8" y2="14.734" class="cls-1"/>
+    <line x1="1.188" y1="7.922" x2="14.812" y2="7.922" class="cls-1"/>
+  </g>
+</svg>

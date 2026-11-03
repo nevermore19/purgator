@@ -1,6 +1,7 @@
 from pathlib import Path
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QSize, Qt, Signal
+from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import (
     QDialog,
     QFileDialog,
@@ -16,6 +17,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from purgator.ui.assets import ICONS_DIR
 from purgator.ui.colors import ACCENT, BACKGROUND, BORDER, HOVER, TEXT
 from purgator.ui.components import ThinScrollBar, page_layout, rounded_box, set_list_palette
 from purgator.ui.styles import PLAIN_BUTTON_STYLE, PRIMARY_BUTTON_STYLE
@@ -26,6 +28,33 @@ EDIT_BUTTON_STYLE = (
     " padding: 2px 12px; font-size: 13px; }"
     f"QPushButton:hover {{ background-color: {HOVER}; }}"
 )
+
+# Icon of the table header section that adds a new scan task
+ADD_ICON_PATH = ICONS_DIR / "add.svg"
+ADD_ICON_SIZE = 16
+
+
+class _AddTaskHeader(QHeaderView):
+    """Header that paints the add icon in the middle of the add column."""
+
+    def __init__(self, icon: QIcon, parent: QWidget | None = None) -> None:
+        super().__init__(Qt.Orientation.Horizontal, parent)
+        self.setSectionsClickable(True)
+        self._icon = icon
+
+    def paintSection(self, painter, rect, logical_index) -> None:
+        super().paintSection(painter, rect, logical_index)
+        if logical_index != 2:
+            return
+        pixmap = self._icon.pixmap(QSize(ADD_ICON_SIZE, ADD_ICON_SIZE))
+        painter.save()
+        painter.setClipRect(rect)
+        painter.drawPixmap(
+            rect.x() + (rect.width() - pixmap.width()) // 2,
+            rect.y() + (rect.height() - pixmap.height()) // 2,
+            pixmap,
+        )
+        painter.restore()
 
 
 def _display_path(path: Path) -> str:
@@ -137,7 +166,8 @@ class WhitelistPage(QWidget):
 
         self._table = QTableWidget(len(self._roots), 3)
         table = self._table
-        table.setHorizontalHeaderLabels(["Task", "Scanned path", "+"])
+        table.setHorizontalHeader(_AddTaskHeader(QIcon(str(ADD_ICON_PATH)), table))
+        table.setHorizontalHeaderLabels(["Task", "Scanned path", ""])
         table.verticalHeader().setVisible(False)
         header = table.horizontalHeader()
         header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
@@ -145,11 +175,7 @@ class WhitelistPage(QWidget):
         header.setSectionResizeMode(2, QHeaderView.ResizeMode.Fixed)
         table.setColumnWidth(2, 78)
         plus = table.horizontalHeaderItem(2)
-        plus.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
         plus.setToolTip("Add a new task")
-        plus_font = plus.font()
-        plus_font.setPixelSize(24)
-        plus.setFont(plus_font)
         header.sectionClicked.connect(self._on_header_clicked)
         table.setVerticalScrollBar(ThinScrollBar(Qt.Orientation.Vertical, table))
         table.setHorizontalScrollBar(ThinScrollBar(Qt.Orientation.Horizontal, table))
