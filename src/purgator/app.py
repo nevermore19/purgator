@@ -37,13 +37,20 @@ def main(argv: list[str] | None = None) -> int:
     from PySide6.QtGui import QFont, QIcon
     from PySide6.QtWidgets import QApplication
 
-    from purgator.ui import MainWindow
-
     # Third-party app icons with heavy masks/filters make QtSvg spam warnings
     QLoggingCategory.setFilterRules("qt.svg.draw.warning=false")
     app = QApplication([sys.argv[0], *qt_args])
     app.setOrganizationName("purgator")
     app.setApplicationName("purgator")
+
+    # The pages read the colours while they are imported, so the theme has to
+    # be in place before the main window is built.
+    from purgator.ui import theme
+
+    theme.apply()
+
+    from purgator.ui import MainWindow
+
     font = QFont("Noto Sans")
     font.setStyleHint(QFont.StyleHint.SansSerif)
     app.setFont(font)

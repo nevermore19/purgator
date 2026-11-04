@@ -2,7 +2,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from PySide6.QtCore import QEvent, QSize, Qt, Signal
-from PySide6.QtGui import QColor, QIcon
+from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QHeaderView,
     QLabel,
@@ -14,7 +14,7 @@ from PySide6.QtWidgets import (
 )
 
 from purgator.tasks import TASKS, PurgeTask, TaskResult, human_size
-from purgator.ui.assets import ICONS_DIR
+from purgator.ui.assets import ICONS_DIR, themed_icon
 from purgator.ui.colors import BACKGROUND, STRIPE
 from purgator.ui.components import (
     RowDelegate,
@@ -101,8 +101,8 @@ class _ResultTree(QTreeWidget):
         set_list_palette(self)
         self.setStyleSheet(TREE_STYLE)
         self.setIconSize(QSize(KIND_ICON_SIZE, KIND_ICON_SIZE))
-        self._folder_icon = QIcon(str(FOLDER_ICON_PATH))
-        self._file_icon = QIcon(str(FILE_ICON_PATH))
+        self._folder_icon = themed_icon(FOLDER_ICON_PATH)
+        self._file_icon = themed_icon(FILE_ICON_PATH)
         self.itemExpanded.connect(self._on_expanded)
         self.itemCollapsed.connect(self._on_collapsed)
         self.viewport().installEventFilter(self)

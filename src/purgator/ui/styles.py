@@ -9,6 +9,7 @@ from purgator.ui.colors import (
     DISABLED,
     HOVER,
     TEXT,
+    TEXT_ON_ACCENT,
 )
 
 # The look of the result lists
@@ -32,7 +33,7 @@ PLAIN_BUTTON_STYLE = (
 )
 
 PRIMARY_BUTTON_STYLE = (
-    f"QPushButton {{ background-color: {ACCENT}; color: {BACKGROUND};"
+    f"QPushButton {{ background-color: {ACCENT}; color: {TEXT_ON_ACCENT};"
     f" border: 1px solid {ACCENT}; border-radius: 15px;"
     " padding: 4px 22px; font-size: 18px; }"
     f"QPushButton:hover {{ background-color: {ACCENT_HOVER}; }}"

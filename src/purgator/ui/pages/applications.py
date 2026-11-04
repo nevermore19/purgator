@@ -14,7 +14,7 @@ from PySide6.QtWidgets import (
 
 from purgator.apps import Application, discover_applications, remove_application
 from purgator.tasks import Cancelled, human_size
-from purgator.ui.assets import ICONS_DIR
+from purgator.ui.assets import ICONS_DIR, themed_icon
 from purgator.ui.colors import BACKGROUND, STRIPE
 from purgator.ui.components import (
     RowDelegate,
@@ -116,7 +116,7 @@ class _ApplicationList(QTreeWidget):
         self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
         self.setVerticalScrollBar(ThinScrollBar(Qt.Orientation.Vertical, self))
         self.setIconSize(QSize(APP_ICON_SIZE, APP_ICON_SIZE))
-        self._fallback_icon = QIcon(str(APPLICATION_ICON_PATH))
+        self._fallback_icon = themed_icon(APPLICATION_ICON_PATH)
         self._icons: dict[str, QIcon] = {}  # one lookup per icon name
         # the rows are sorted by hand: the order depends on the moment of the
         # last use, not on the words of the column
