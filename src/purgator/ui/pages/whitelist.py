@@ -17,7 +17,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from purgator.ui.assets import ICONS_DIR
+from purgator.ui.assets import ICONS_DIR, themed_icon
 from purgator.ui.colors import ACCENT, BACKGROUND, BORDER, HOVER, TEXT
 from purgator.ui.components import ThinScrollBar, page_layout, rounded_box, set_list_palette
 from purgator.ui.styles import PLAIN_BUTTON_STYLE, PRIMARY_BUTTON_STYLE
@@ -166,7 +166,7 @@ class WhitelistPage(QWidget):
 
         self._table = QTableWidget(len(self._roots), 3)
         table = self._table
-        table.setHorizontalHeader(_AddTaskHeader(QIcon(str(ADD_ICON_PATH)), table))
+        table.setHorizontalHeader(_AddTaskHeader(themed_icon(ADD_ICON_PATH, ACCENT), table))
         table.setHorizontalHeaderLabels(["Task", "Scanned path", ""])
         table.verticalHeader().setVisible(False)
         header = table.horizontalHeader()

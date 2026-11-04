@@ -5,8 +5,9 @@ import uuid
 from pathlib import Path
 
 from PySide6.QtCore import QSettings, Qt
-from PySide6.QtGui import QCloseEvent, QPixmap
+from PySide6.QtGui import QCloseEvent
 from PySide6.QtWidgets import (
+    QApplication,
     QHBoxLayout,
     QLabel,
     QListWidget,
@@ -20,17 +21,18 @@ from PySide6.QtWidgets import (
 from purgator.scheduler import CronScheduler
 from purgator.tasks import TASKS, PurgeTask, create_task
 from purgator.tasks.builtin import make_custom_path_task
-from purgator.ui.assets import ICONS_DIR
+from purgator.ui.assets import ICONS_DIR, themed_icon
 from purgator.ui.colors import ACCENT, BACKGROUND, BORDER, TEXT
 from purgator.ui.pages import (
     ApplicationsPage,
     CleanupPage,
     HistoryPage,
     OverviewPage,
-    PlaceholderPage,
     SchedulePage,
+    SettingsPage,
     WhitelistPage,
 )
+from purgator.ui import theme
 from purgator.workers import TaskRunner
 
 CUSTOM_TASK_PREFIX = "custom_"
@@ -83,6 +85,8 @@ class MainWindow(QMainWindow):
         self.whitelist = WhitelistPage(self._scan_roots())
         self.whitelist.path_changed.connect(self._set_scan_root)
         self.whitelist.task_added.connect(self._add_custom_task)
+        self.settings_page = SettingsPage(self.settings)
+        self.settings_page.theme_changed.connect(self._change_theme)
         for page in (self.cleanup, self.applications, self.schedule):
             page.logged.connect(self.history.log)
         for page in (self.cleanup, self.applications):
@@ -95,7 +99,7 @@ class MainWindow(QMainWindow):
         self.stack.addWidget(self.schedule)
         self.stack.addWidget(self.history)
         self.stack.addWidget(self.whitelist)
-        self.stack.addWidget(PlaceholderPage("Settings"))
+        self.stack.addWidget(self.settings_page)
         content.addWidget(self.stack, stretch=1)
 
         layout.addLayout(content, stretch=1)
@@ -115,15 +119,18 @@ class MainWindow(QMainWindow):
         self.header_left.setStyleSheet(
             f"font-size: 24px; font-weight: 600; padding: 5px 12px 5px 12px; border: 1px solid {BORDER}; border-left: none; border-top: none; border-right: 1px solid {BORDER};"
         )
-        logo = QPixmap(str(ICONS_DIR / "purgator-logo.svg"))
+        logo = themed_icon(ICONS_DIR / "purgator-logo.svg", TEXT)
         self.header_right = QLabel("Overview")
         self.header_right.setStyleSheet(
             f"font-size: 24px; font-weight: 600; padding: 12px 12px 12px 12px; border: 1px solid {BORDER}; border-top: none; border-right: none; border-left: none;"
         )
         if not logo.isNull():
             inner_h = self.header_right.sizeHint().height() - 10
+            logo_pixmap = logo.pixmap(512, 512)
             self.header_left.setPixmap(
-                logo.scaledToHeight(inner_h, Qt.TransformationMode.SmoothTransformation)
+                logo_pixmap.scaledToHeight(
+                    inner_h, Qt.TransformationMode.SmoothTransformation
+                )
             )
         else:
             self.header_left.setText("Purgator")
@@ -173,7 +180,13 @@ class MainWindow(QMainWindow):
             item.setFont(font)
 
     def _on_running_changed(self, count: int) -> None:
-        self.running_label.setText(f"{count} task(s) running" if count else "Idle")
+        bar = self.statusBar()
+        if count:
+            self.running_label.setText(f"{count} task(s) running")
+            bar.show()
+        else:
+            self.running_label.clear()
+            bar.hide()
 
     def make_task(self, task_id: str, dry_run: bool = False) -> PurgeTask:
         root = self.settings.value(scan_root_key(task_id))
@@ -231,6 +244,32 @@ class MainWindow(QMainWindow):
 
     def log(self, message: str) -> None:
         self.history.log(message)
+
+    def _change_theme(self, name: str) -> None:
+        """Reload the pages and build the window again with the new colours."""
+        geometry = self.geometry()
+        page = self.stack.currentIndex()
+        maximized = self.isMaximized()
+
+        theme.apply(name)
+        theme.reload_ui()
+
+        from purgator.ui import MainWindow as FreshMainWindow
+
+        window = FreshMainWindow()
+        window.setGeometry(geometry)
+        app = QApplication.instance()
+        if app is not None:
+            app._theme_window = window  # keep the new window alive
+        if maximized:
+            window.showMaximized()
+        else:
+            window.show()
+        if 0 <= page < window.nav.count():
+            window.nav.setCurrentRow(page)
+
+        self.close()
+        self.deleteLater()
 
     def closeEvent(self, event: QCloseEvent) -> None:
         self.overview.shutdown()
