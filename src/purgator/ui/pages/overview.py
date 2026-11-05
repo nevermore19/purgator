@@ -3,11 +3,10 @@ import subprocess
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, QSize, Qt, QThreadPool
+from PySide6.QtCore import QSize, Qt, QThreadPool
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QFrame,
-    QGridLayout,
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -90,20 +89,24 @@ class OverviewPage(QWidget):
         if root_path == "/run/host/root":
             home_path_on_root = "/run/host/root/home"
         layout = page_layout(self)
+        layout.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignHCenter)
 
+        box_width = 340
         box = QGroupBox()
-        box.setMinimumWidth(260)
-        box.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        box.setFixedWidth(box_width)
         box.setStyleSheet(BOX_STYLE)
         box_layout = QVBoxLayout(box)
         box_layout.setContentsMargins(10, 10, 10, 4)
         box_layout.setSpacing(0)
+        box_layout.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignHCenter)
         title = QLabel("Disk usage")
         title.setStyleSheet(TITLE_STYLE)
         box_layout.addWidget(title, alignment=Qt.AlignmentFlag.AlignLeft)
         box_layout.addSpacing(0)
-        view = self._build_disk_usage_chart(usage)
-        box_layout.addWidget(view, stretch=1)
+        chart_w = box_width - 20
+        chart_h = int(chart_w * 0.86) + 6
+        view = self._build_disk_usage_chart(usage, chart_w, chart_h)
+        box_layout.addWidget(view)
         available = QLabel(f"{usage.free / (1024**3):.0f} GiB available")
         available.setAlignment(Qt.AlignmentFlag.AlignCenter)
         available.setStyleSheet(f"font-size: 16px; color: {TEXT}; background: transparent;")
@@ -122,14 +125,12 @@ class OverviewPage(QWidget):
         box_layout.addSpacing(60)
 
         right_container = QGroupBox()
-        right_container.setMinimumWidth(260)
-        right_container.setSizePolicy(
-            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
-        )
+        right_container.setFixedWidth(box_width)
         right_container.setStyleSheet(BOX_STYLE)
         right_layout = QVBoxLayout(right_container)
         right_layout.setContentsMargins(10, 10, 10, 4)
         right_layout.setSpacing(8)
+        right_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
         right_title = QLabel("Scheduled tasks")
         right_title.setStyleSheet(TITLE_STYLE)
         right_layout.addWidget(right_title, alignment=Qt.AlignmentFlag.AlignLeft)
@@ -149,18 +150,19 @@ class OverviewPage(QWidget):
             f"QListWidget::item:selected {{ background: {BACKGROUND}; color: {TEXT}; }}"
         )
         right_layout.addWidget(self._scheduled_list, stretch=1)
+        box_height = box.sizeHint().height()
+        scheduled_height = box_height // 2
+        right_container.setFixedHeight(scheduled_height)
         self.scheduler.jobs_changed.connect(self._refresh_scheduled_tasks)
         self._refresh_scheduled_tasks()
 
         activity_container = QGroupBox()
-        activity_container.setMinimumWidth(260)
-        activity_container.setSizePolicy(
-            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
-        )
+        activity_container.setFixedWidth(box_width)
         activity_container.setStyleSheet(BOX_STYLE)
         activity_layout = QVBoxLayout(activity_container)
         activity_layout.setContentsMargins(10, 10, 10, 10)
         activity_layout.setSpacing(10)
+        activity_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
         activity_title = QLabel("Last activity")
         activity_title.setStyleSheet(TITLE_STYLE)
         activity_layout.addWidget(activity_title, alignment=Qt.AlignmentFlag.AlignLeft)
@@ -169,18 +171,21 @@ class OverviewPage(QWidget):
         activity_layout.addWidget(self._scan_label)
         activity_layout.addWidget(self._cleanup_label)
         activity_layout.addStretch()
+        activity_container.setFixedHeight(box_height - scheduled_height - 12)
 
-        row = QGridLayout()
-        row.setHorizontalSpacing(layout.contentsMargins().left())
-        row.setVerticalSpacing(12)
-        row.setColumnStretch(0, 1)
-        row.setColumnStretch(1, 1)
-        row.setRowStretch(0, 1)
-        row.setRowStretch(1, 1)
-        row.addWidget(box, 0, 0, 2, 1)
-        row.addWidget(right_container, 0, 1)
-        row.addWidget(activity_container, 1, 1)
-        layout.addLayout(row, stretch=1)
+        right_column = QVBoxLayout()
+        right_column.setSpacing(12)
+        right_column.setAlignment(Qt.AlignmentFlag.AlignTop)
+        right_column.addWidget(right_container)
+        right_column.addWidget(activity_container)
+
+        row = QHBoxLayout()
+        row.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignHCenter)
+        row.setSpacing(60)
+        row.addWidget(box, alignment=Qt.AlignmentFlag.AlignTop)
+        row.addLayout(right_column)
+        layout.addLayout(row)
+        layout.addStretch()
 
         worker = Worker(_HomeSizeScan(home_path_on_root))
         self._home_size_worker = worker  # the pool does not delete it
@@ -253,15 +258,14 @@ class OverviewPage(QWidget):
             self._scheduled_list.addItem(item)
             self._scheduled_list.setItemWidget(item, row)
 
-    def _build_disk_usage_chart(self, usage) -> QWidget:
+    def _build_disk_usage_chart(self, usage, width: int = 360, height: int = 380) -> QWidget:
         used_gb = usage.used / (1024**3)
         total_gb = usage.total / (1024**3)
         used_pct = usage.used / usage.total * 100 if usage.total else 0
         used_frac = usage.used / usage.total if usage.total else 0
 
         view = RingChart(used_frac)
-        view.setMinimumSize(220, 220)
-        view.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        view.setFixedSize(width, height)
 
         center = QLabel(
             "<table cellpadding='0' cellspacing='0' align='center'>"
@@ -274,24 +278,16 @@ class OverviewPage(QWidget):
         )
         center.setAlignment(Qt.AlignmentFlag.AlignCenter)
         center.setStyleSheet(f"color: {TEXT}; background: transparent;")
-        center.setGeometry(view.rect())
+        center.setGeometry(0, 0, width, height)
         center.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-        self._chart_view = view
-        self._chart_center = center
-        view.installEventFilter(self)
         return view
 
-    def eventFilter(self, obj, event) -> bool:
-        if obj is getattr(self, "_chart_view", None) and event.type() == QEvent.Type.Resize:
-            self._chart_center.setGeometry(obj.rect())
-        return super().eventFilter(obj, event)
-
     def _build_home_to_disk_bar(self) -> QWidget:
+        bar_width = 300
         bar = RatioBar(0.0)
         self._home_bar = bar
         bar.setFixedHeight(12)
-        bar.setMinimumWidth(140)
-        bar.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        bar.setFixedWidth(bar_width)
 
         section_title = QLabel("Home directory")
         section_title.setStyleSheet(f"{TITLE_STYLE} background: transparent;")
@@ -300,6 +296,7 @@ class OverviewPage(QWidget):
         lbl = QLabel(f"<span style='font-size:16px;color:{TEXT};'>… GiB</span>")
         self._home_size_label = lbl
         lbl.setStyleSheet("background: transparent;")
+        lbl.setFixedWidth(bar_width)
         lbl.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
 
         container = QWidget()
@@ -308,15 +305,15 @@ class OverviewPage(QWidget):
         vbox.setSpacing(0)
         vbox.addWidget(section_title)
         vbox.addSpacing(16)
-        vbox.addWidget(lbl)
+        vbox.addWidget(lbl, alignment=Qt.AlignmentFlag.AlignHCenter)
         vbox.addSpacing(4)
-        vbox.addWidget(bar)
+        vbox.addWidget(bar, alignment=Qt.AlignmentFlag.AlignHCenter)
         vbox.addSpacing(16)
         pct = QLabel(f"<span style='font-size:16px;color:{TEXT};'>Measuring your files…</span>")
         self._home_pct_label = pct
         pct.setStyleSheet("background: transparent;")
         pct.setAlignment(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter)
-        vbox.addWidget(pct)
+        vbox.addWidget(pct, alignment=Qt.AlignmentFlag.AlignHCenter)
 
         return container
 

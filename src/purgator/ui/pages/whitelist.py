@@ -18,7 +18,7 @@ from PySide6.QtWidgets import (
 )
 
 from purgator.ui.assets import ICONS_DIR, themed_icon
-from purgator.ui.colors import ACCENT, BACKGROUND, BORDER, HOVER, REMOVE_HOVER, TEXT
+from purgator.ui.colors import ACCENT, BACKGROUND, BORDER, HOVER, TEXT
 from purgator.ui.components import ThinScrollBar, page_layout, rounded_box, set_list_palette
 from purgator.ui.styles import PLAIN_BUTTON_STYLE, PRIMARY_BUTTON_STYLE
 
@@ -29,20 +29,13 @@ EDIT_BUTTON_STYLE = (
     f"QPushButton:hover {{ background-color: {HOVER}; }}"
 )
 
-REMOVE_BUTTON_STYLE = (
-    f"QPushButton {{ background-color: transparent; color: {ACCENT};"
-    " border: none; font-size: 16px; }"
-    f"QPushButton:hover {{ color: {REMOVE_HOVER}; }}"
-)
-
 # Icon of the table header section that adds a new scan task
 ADD_ICON_PATH = ICONS_DIR / "add.svg"
 ADD_ICON_SIZE = 16
-ADD_ICON_RIGHT_MARGIN = 12
 
 
 class _AddTaskHeader(QHeaderView):
-    """Header that paints the add icon at the right of the add column."""
+    """Header that paints the add icon in the middle of the add column."""
 
     def __init__(self, icon: QIcon, parent: QWidget | None = None) -> None:
         super().__init__(Qt.Orientation.Horizontal, parent)
@@ -57,7 +50,7 @@ class _AddTaskHeader(QHeaderView):
         painter.save()
         painter.setClipRect(rect)
         painter.drawPixmap(
-            rect.right() - pixmap.width() - ADD_ICON_RIGHT_MARGIN,
+            rect.x() + (rect.width() - pixmap.width()) // 2,
             rect.y() + (rect.height() - pixmap.height()) // 2,
             pixmap,
         )
@@ -157,7 +150,6 @@ class WhitelistPage(QWidget):
 
     path_changed = Signal(str, str)  # task_id, new path
     task_added = Signal(str, str)  # task name, path
-    task_removed = Signal(str)  # task_id
 
     def __init__(
         self,
@@ -176,16 +168,12 @@ class WhitelistPage(QWidget):
         table = self._table
         table.setHorizontalHeader(_AddTaskHeader(themed_icon(ADD_ICON_PATH, ACCENT), table))
         table.setHorizontalHeaderLabels(["Task", "Scanned path", ""])
-        task_header = table.horizontalHeaderItem(0)
-        task_header.setTextAlignment(
-            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
-        )
         table.verticalHeader().setVisible(False)
         header = table.horizontalHeader()
         header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
         header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         header.setSectionResizeMode(2, QHeaderView.ResizeMode.Fixed)
-        table.setColumnWidth(2, 112)
+        table.setColumnWidth(2, 78)
         plus = table.horizontalHeaderItem(2)
         plus.setToolTip("Add a new task")
         header.sectionClicked.connect(self._on_header_clicked)
@@ -194,8 +182,7 @@ class WhitelistPage(QWidget):
         set_list_palette(table)
         table.setStyleSheet(
             f"QTableWidget {{ background: {BACKGROUND}; border: none; outline: none; }}"
-            f"QTableWidget::item {{ background: {BACKGROUND}; color: {TEXT};"
-            " padding: 4px 8px; font-size: 15px; }"
+            f"QTableWidget::item {{ background: {BACKGROUND}; color: {TEXT}; padding: 4px 8px; }}"
             f"QTableWidget::item:selected {{ background: {BACKGROUND}; color: {TEXT}; }}"
             f"QHeaderView {{ background: {BACKGROUND}; border: none; }}"
             f"QHeaderView::section {{ background: {BACKGROUND}; color: {ACCENT};"
@@ -222,22 +209,13 @@ class WhitelistPage(QWidget):
 
         edit = QPushButton("Edit")
         edit.setStyleSheet(EDIT_BUTTON_STYLE)
-        edit.clicked.connect(lambda _=False, tid=task_id: self._edit_task(tid))
-
-        remove = QPushButton("×")
-        remove.setFixedSize(22, 22)
-        remove.setStyleSheet(REMOVE_BUTTON_STYLE)
-        remove.setToolTip("Remove this task")
-        remove.clicked.connect(lambda _=False, tid=task_id: self._remove_task(tid))
-
+        edit.clicked.connect(lambda _=False, r=row: self._edit_row(r))
         cell = QWidget()
         cell.setStyleSheet("background: transparent;")
         cell_layout = QHBoxLayout(cell)
         cell_layout.setContentsMargins(0, 0, 0, 0)
-        cell_layout.setSpacing(8)
         cell_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
         cell_layout.addWidget(edit)
-        cell_layout.addWidget(remove)
         table.setCellWidget(row, 2, cell)
 
     def add_root(self, task_id: str, task_name: str, path: Path) -> None:
@@ -245,13 +223,6 @@ class WhitelistPage(QWidget):
         row = self._table.rowCount()
         self._table.insertRow(row)
         self._fill_row(row, task_id, task_name, path)
-
-    def set_roots(self, scan_roots: list[tuple[str, str, Path]]) -> None:
-        self._roots = list(scan_roots)
-        self._table.setRowCount(0)
-        self._table.setRowCount(len(self._roots))
-        for row, root in enumerate(self._roots):
-            self._fill_row(row, *root)
 
     def _on_header_clicked(self, section: int) -> None:
         if section == 2:
@@ -262,15 +233,8 @@ class WhitelistPage(QWidget):
         if dialog.exec() == QDialog.DialogCode.Accepted:
             self.task_added.emit(dialog.task_name(), str(dialog.path()))
 
-    def _row_for(self, task_id: str) -> int:
-        for row, (tid, _, _) in enumerate(self._roots):
-            if tid == task_id:
-                return row
-        return -1
-
-    def _edit_task(self, task_id: str) -> None:
-        row = self._row_for(task_id)
-        if row < 0:
+    def _edit_row(self, row: int) -> None:
+        if not 0 <= row < len(self._roots):
             return
         task_id, task_name, path = self._roots[row]
         chosen = QFileDialog.getExistingDirectory(
@@ -284,11 +248,3 @@ class WhitelistPage(QWidget):
         item.setText(_display_path(new_path))
         item.setToolTip(str(new_path))
         self.path_changed.emit(task_id, str(new_path))
-
-    def _remove_task(self, task_id: str) -> None:
-        row = self._row_for(task_id)
-        if row < 0:
-            return
-        self._roots.pop(row)
-        self._table.removeRow(row)
-        self.task_removed.emit(task_id)

@@ -15,7 +15,7 @@ class RingChart(QWidget):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         painter.fillRect(self.rect(), QColor(BACKGROUND))
 
-        side = min(self.width(), self.height())
+        side = self.width()
         band = side * 0.085
         outer_radius = side * 0.43
         radius = outer_radius - band / 2

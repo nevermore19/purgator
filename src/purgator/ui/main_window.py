@@ -19,7 +19,7 @@ from PySide6.QtWidgets import (
 )
 
 from purgator.scheduler import CronScheduler
-from purgator.tasks import BUILTIN_TASKS, TASKS, PurgeTask, create_task
+from purgator.tasks import TASKS, PurgeTask, create_task
 from purgator.tasks.builtin import make_custom_path_task
 from purgator.ui.assets import ICONS_DIR, themed_icon
 from purgator.ui.colors import ACCENT, BACKGROUND, BORDER, TEXT
@@ -37,7 +37,6 @@ from purgator.workers import TaskRunner
 
 CUSTOM_TASK_PREFIX = "custom_"
 CUSTOM_TASKS_KEY = "whitelist/custom_tasks"
-REMOVED_TASKS_KEY = "whitelist/removed_tasks"
 
 
 def scan_root_key(task_id: str) -> str:
@@ -63,7 +62,6 @@ class MainWindow(QMainWindow):
 
         self.settings = QSettings()
         self._load_custom_tasks()
-        self._load_removed_tasks()
         self.runner = TaskRunner(self)
         self.scheduler = CronScheduler(self.runner, self.make_task, self.settings, self)
 
@@ -87,10 +85,8 @@ class MainWindow(QMainWindow):
         self.whitelist = WhitelistPage(self._scan_roots())
         self.whitelist.path_changed.connect(self._set_scan_root)
         self.whitelist.task_added.connect(self._add_custom_task)
-        self.whitelist.task_removed.connect(self._remove_task)
         self.settings_page = SettingsPage(self.settings)
         self.settings_page.theme_changed.connect(self._change_theme)
-        self.settings_page.task_paths_reset.connect(self._reset_task_paths)
         for page in (self.cleanup, self.applications, self.schedule):
             page.logged.connect(self.history.log)
         for page in (self.cleanup, self.applications):
@@ -211,37 +207,6 @@ class MainWindow(QMainWindow):
         self.settings.setValue(scan_root_key(task_id), root)
         self.settings.sync()
 
-    def _reset_task_paths(self) -> None:
-        for task_id in list(self._removed_tasks):
-            TASKS[task_id] = BUILTIN_TASKS[task_id]
-            self.cleanup.add_task_category(task_id, BUILTIN_TASKS[task_id].name)
-        self._removed_tasks.clear()
-        self._save_removed_tasks()
-        for task_id in TASKS:
-            if task_id.startswith(CUSTOM_TASK_PREFIX):
-                continue
-            self.settings.remove(scan_root_key(task_id))
-        self.settings.sync()
-        self.whitelist.set_roots(self._scan_roots())
-
-    def _remove_task(self, task_id: str) -> None:
-        if task_id.startswith(CUSTOM_TASK_PREFIX):
-            TASKS.pop(task_id, None)
-            self._custom_tasks = [
-                task for task in self._custom_tasks if task.get("id") != task_id
-            ]
-            self._save_custom_tasks()
-        elif task_id in BUILTIN_TASKS:
-            TASKS.pop(task_id, None)
-            self._removed_tasks.add(task_id)
-            self._save_removed_tasks()
-        else:
-            return
-        self.settings.remove(scan_root_key(task_id))
-        self.settings.sync()
-        self.cleanup.remove_task_category(task_id)
-        self.scheduler.remove_task_jobs(task_id)
-
     def _load_custom_tasks(self) -> None:
         for task_id in [tid for tid in TASKS if tid.startswith(CUSTOM_TASK_PREFIX)]:
             del TASKS[task_id]
@@ -264,24 +229,6 @@ class MainWindow(QMainWindow):
 
     def _save_custom_tasks(self) -> None:
         self.settings.setValue(CUSTOM_TASKS_KEY, json.dumps(self._custom_tasks))
-        self.settings.sync()
-
-    def _load_removed_tasks(self) -> None:
-        try:
-            items = json.loads(self.settings.value(REMOVED_TASKS_KEY, "[]"))
-        except (TypeError, ValueError):
-            items = []
-        self._removed_tasks: set[str] = set()
-        if not isinstance(items, list):
-            return
-        for task_id in items:
-            if isinstance(task_id, str) and task_id in BUILTIN_TASKS:
-                self._removed_tasks.add(task_id)
-                TASKS.pop(task_id, None)
-
-    def _save_removed_tasks(self) -> None:
-        removed = sorted(self._removed_tasks)
-        self.settings.setValue(REMOVED_TASKS_KEY, json.dumps(removed))
         self.settings.sync()
 
     def _add_custom_task(self, name: str, path: str) -> None:
