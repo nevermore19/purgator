@@ -125,6 +125,13 @@ class CronScheduler(QObject):
         self._next.pop(id(job), None)
         self._changed()
 
+    def remove_task_jobs(self, task_id: str) -> None:
+        jobs = [job for job in self.jobs if job.task_id != task_id]
+        if len(jobs) == len(self.jobs):
+            return
+        self.jobs = jobs
+        self._changed()
+
     def set_enabled(self, index: int, enabled: bool) -> None:
         self.jobs[index].enabled = enabled
         self._changed()
