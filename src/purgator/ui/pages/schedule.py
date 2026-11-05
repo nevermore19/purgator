@@ -3,8 +3,6 @@ from datetime import datetime
 from PySide6.QtCore import QDate, Qt, QTime, Signal
 from PySide6.QtGui import QColor, QPalette
 from PySide6.QtWidgets import (
-    QComboBox,
-    QDateEdit,
     QDialog,
     QFormLayout,
     QHBoxLayout,
@@ -13,9 +11,9 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QSpinBox,
+    QStyledItemDelegate,
     QTableWidget,
     QTableWidgetItem,
-    QTimeEdit,
     QVBoxLayout,
     QWidget,
 )
@@ -33,7 +31,16 @@ from purgator.ui.colors import (
     TEXT,
     TEXT_ON_ACCENT,
 )
-from purgator.ui.components import Switch, actions_row, page_layout, rounded_box, set_list_palette
+from purgator.ui.components import (
+    ChevronDateEdit,
+    ChevronTimeEdit,
+    DropdownComboBox,
+    Switch,
+    actions_row,
+    page_layout,
+    rounded_box,
+    set_list_palette,
+)
 from purgator.ui.styles import PLAIN_BUTTON_STYLE, PRIMARY_BUTTON_STYLE
 
 LINE_EDIT_STYLE = f"QLineEdit {{ background-color: {BACKGROUND}; color: {TEXT}; border: none; }}"
@@ -51,7 +58,8 @@ class _NewTaskDialog(QDialog):
             f"QLabel {{ font-size: 17px; color: {TEXT}; background: transparent; }}"
             f"QComboBox {{ background-color: {BACKGROUND}; color: {TEXT}; border: 1px solid {BORDER}; border-radius: 4px; padding: 2px 6px; }}"
             "QComboBox::drop-down { border: none; background: transparent; width: 24px; }"
-            f"QComboBox QAbstractItemView {{ background-color: {BACKGROUND}; selection-background-color: {ACCENT}; selection-color: {TEXT_ON_ACCENT}; color: {TEXT}; }}"
+            "QComboBox::down-arrow { image: none; }"
+            f"QComboBox QAbstractItemView {{ background-color: {BACKGROUND}; selection-background-color: {STRIPE}; selection-color: {TEXT}; color: {TEXT}; }}"
             f"QComboBox QAbstractItemView::item {{ color: {TEXT}; }}"
             f"QComboBox QAbstractItemView::item:hover {{ background-color: {STRIPE}; color: {TEXT}; }}"
             f"QDateEdit, QTimeEdit, QSpinBox {{ background-color: {BACKGROUND}; color: {TEXT}; border: 1px solid {BORDER}; border-radius: 4px; padding: 2px 6px; }}"
@@ -68,11 +76,11 @@ class _NewTaskDialog(QDialog):
         layout.setContentsMargins(20, 20, 20, 20)
         layout.setSpacing(14)
 
-        self.task_combo = QComboBox()
+        self.task_combo = DropdownComboBox()
         for task_id, cls in TASKS.items():
             self.task_combo.addItem(cls.name, task_id)
 
-        self.date_edit = QDateEdit()
+        self.date_edit = ChevronDateEdit()
         self.date_edit.setCalendarPopup(True)
         self.date_edit.setDisplayFormat("yyyy-MM-dd")
         self.date_edit.setDate(QDate.currentDate())
@@ -93,11 +101,11 @@ class _NewTaskDialog(QDialog):
             le.setStyleSheet(LINE_EDIT_STYLE)
             le.setPalette(le.palette())
 
-        self.unit_combo = QComboBox()
+        self.unit_combo = DropdownComboBox()
         self.unit_combo.addItem("day(s)", "day")
         self.unit_combo.addItem("month(s)", "month")
 
-        self.hour_edit = QTimeEdit()
+        self.hour_edit = ChevronTimeEdit()
         self.hour_edit.setDisplayFormat("HH:mm")
         self.hour_edit.setTime(QTime(3, 0))
         self.hour_edit.setCalendarPopup(True)
@@ -129,12 +137,13 @@ class _NewTaskDialog(QDialog):
                 pass
 
         for combo in (self.task_combo, self.unit_combo):
+            combo.setItemDelegate(QStyledItemDelegate(combo))
             if view := combo.view():
                 view_palette = view.palette()
                 view_palette.setColor(QPalette.ColorRole.Base, QColor(BACKGROUND))
                 view_palette.setColor(QPalette.ColorRole.Text, QColor(TEXT))
-                view_palette.setColor(QPalette.ColorRole.Highlight, QColor(ACCENT))
-                view_palette.setColor(QPalette.ColorRole.HighlightedText, QColor(TEXT_ON_ACCENT))
+                view_palette.setColor(QPalette.ColorRole.Highlight, QColor(STRIPE))
+                view_palette.setColor(QPalette.ColorRole.HighlightedText, QColor(TEXT))
                 view.setPalette(view_palette)
 
         self.every_spin.setFixedWidth(70)
@@ -264,9 +273,10 @@ class SchedulePage(QWidget):
             self.jobs_table.setColumnWidth(1, 450)
 
         set_list_palette(self.jobs_table)
+        self.jobs_table.setShowGrid(False)
         self.jobs_table.setStyleSheet(
             f"QTableWidget {{ background: {BACKGROUND}; border: none; outline: none; }}"
-            f"QTableWidget::item {{ background: {BACKGROUND}; color: {TEXT}; }}"
+            f"QTableWidget::item {{ background: {BACKGROUND}; color: {TEXT}; border: none; }}"
             f"QTableWidget::item:selected {{ background: {BACKGROUND}; color: {TEXT}; }}"
             f"QHeaderView::section {{ background: {BACKGROUND}; color: {ACCENT};"
             f" border: none; border-bottom: 1px solid {BORDER}; padding: 4px 6px;"
@@ -317,10 +327,16 @@ class SchedulePage(QWidget):
             toggle.toggled.connect(lambda checked, r=row: self._set_job_enabled(r, checked))
             table.setCellWidget(row, 0, self._centered(toggle))
 
-            table.setItem(row, 1, QTableWidgetItem(job.describe()))
-            table.setItem(row, 2, QTableWidgetItem(TASKS[job.task_id].name))
             nxt = self.scheduler.next_run(job)
-            table.setItem(row, 3, QTableWidgetItem(nxt.strftime("%Y-%m-%d %H:%M") if nxt else "—"))
+            values = (
+                job.describe(),
+                TASKS[job.task_id].name,
+                nxt.strftime("%Y-%m-%d %H:%M") if nxt else "—",
+            )
+            for column, text in enumerate(values, start=1):
+                item = QTableWidgetItem(text)
+                item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                table.setItem(row, column, item)
 
             remove = QPushButton("×")
             remove.setFixedSize(22, 22)

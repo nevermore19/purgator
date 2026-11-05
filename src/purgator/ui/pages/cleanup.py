@@ -132,6 +132,16 @@ class _ResultTree(QTreeWidget):
         item.setBackground(1, brush)
         item.setBackground(2, brush)
 
+    def remove_category(self, task_id: str) -> None:
+        item = self._categories.pop(task_id, None)
+        self._entries.pop(task_id, None)
+        self._checked.pop(task_id, None)
+        if item is None:
+            return
+        index = self.indexOfTopLevelItem(item)
+        if index >= 0:
+            self.takeTopLevelItem(index)
+
     def _paint_files(self, category: QTreeWidgetItem) -> None:
         """The files of a category alternate; the header stays plain."""
         for index in range(category.childCount()):
@@ -302,6 +312,9 @@ class CleanupPage(QWidget):
         if task_id in self.results._categories:
             return
         self.results.add_category(task_id, CATEGORY_LABELS.get(task_id, name))
+
+    def remove_task_category(self, task_id: str) -> None:
+        self.results.remove_category(task_id)
 
     def _build_actions(self):
         self.info_label = QLabel("Nothing scanned yet")
