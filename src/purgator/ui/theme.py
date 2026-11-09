@@ -14,7 +14,7 @@ LIGHT = "light"
 DARK = "dark"
 SYSTEM = "system"
 
-DEFAULT = LIGHT
+DEFAULT = SYSTEM
 THEMES = (
     (LIGHT, "Light"),
     (DARK, "Dark"),
